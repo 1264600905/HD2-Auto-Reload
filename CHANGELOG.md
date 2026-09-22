@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.0
+
+- Migrate to Steam build 25327279; reject mismatched binaries and native layouts.
+- Add verified Heat latch reading with effective configuration overrides and a full one-second delay, including held fire.
+- Skip normal heating and automatically recoverable cooling locks.
+- Revalidate full entity identity, local avatar, slot and ammo path immediately before R.
+- Update Rounds record stride (0x84 -> 0x88) and use complete build-specific resource maps for all supported ammo paths.
+- Verify Laser Cannon ready/burned-out/manually-replaced states on the live game. User subsequently confirmed functional testing passed, including automatic reload for energy weapons.
+- Add read-only inspection tools and synthetic context-chain regression coverage.
+
 ## 0.4.0 — test build
 
 - Reduce the idle-empty reload timer from 3 seconds to 1 second.

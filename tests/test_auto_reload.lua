@@ -85,8 +85,8 @@ test('native magazine reader validates entity and exact layout', function()
     local function unhex(s) return (s:gsub('..',function(p) return string.char(tonumber(p,16)) end)) end
     local function hex(s) return (s:gsub('.',function(c) return string.format('%02x',c:byte()) end)) end
     local memory={
-        [0x100000+0x73d062]=unhex('488b2d0ff30202'),
-        [0x100000+0x73d0cc]=unhex('488b4d38488bdf48c1e30448035d48488b0cf9e8dc1bdbff80b89c000000007420488b4550488d0c7f807c880800750a837b08000f85b600000032c0e9b1000000833b000f9fc0e9a6000000'),
+        [0x100000+0x744d02]=unhex('488b2d3f19be02'),
+        [0x100000+0x744d6c]=unhex('488b4d38488bdf48c1e30448035d48488b0cf9e8bce9daff80b89c000000007420488b4550488d0c7f807c880800750a837b08000f85b600000032c0e9b1000000833b000f9fc0e9a6000000'),
         [0x40000]=string.rep('W',24),
         [0x50000+2*16]=word(7)..word(99)..word(259)..word(0),
         [0x60000+2*12]=string.rep('\0',8)..'\1\0\0\0',
@@ -101,7 +101,7 @@ test('native magazine reader validates entity and exact layout', function()
     end},{__index=_G}))
     local reader=factory()
     local e={game=0x100000,weapon_id=42,weapon=string.rep('W',24),
-        global=function(rva) assert(rva==0x276c378); return 0x20000 end,
+        global=function(rva) assert(rva==0x3326648); return 0x20000 end,
         lookup=function(address,id) assert(address==0x20020 and id==42); return 2 end,
         pointer=function(address,guard) assert(guard); return assert(pointers[address]) end,
         read=function(address,size) local s=assert(memory[address]); assert(#s==size); return s end}
@@ -114,6 +114,91 @@ test('native magazine reader validates entity and exact layout', function()
     verified=false; row={}; reader(e,row); assert(not row.magazine_verified)
     assert(row.ammo_status=='magazine_static_identity_unverified')
 end)
+test('burned heat sink waits a full second even while firing', function()
+    for _,slot in ipairs({1,2,3}) do
+        local s=scenario(); s.row.ammo_path='weapon_heat'; s.row.selected_slot=slot
+        s.row.heat_verified=true; s.row.heat_requires_replacement=true; s.row.heat_overheated=true
+        s.state.keys.LMB=true; s.state.lmb_edge_time=0
+        s.step(0); s.step(.16); s.step(.99); assert(s.sent()==0)
+        s.step(1); s.step(5); assert(s.sent()==1)
+    end
+end)
+
+test('normal heat, cooling lock and unverified heat never trigger', function()
+    for _,field in ipairs({'heat_overheated','heat_requires_replacement','heat_verified'}) do
+        local s=scenario(); s.row.ammo_path='weapon_heat'
+        s.row.heat_verified=true; s.row.heat_requires_replacement=true; s.row.heat_overheated=true
+        s.row[field]=false; s.state.keys.LMB=true; s.step(0); s.step(4); assert(s.sent()==0)
+    end
+end)
+
+test('heat fresh unlock and entity reuse cancel pending request', function()
+    for _,field in ipairs({'heat_overheated','heat_verified','_weapon_bytes','selected_slot'}) do
+        local s=scenario(); s.row.ammo_path='weapon_heat'; s.row._weapon_bytes='identity A'
+        s.row.heat_verified=true; s.row.heat_requires_replacement=true; s.row.heat_overheated=true
+        s.step(0)
+        local fresh={}; for k,v in pairs(s.row) do fresh[k]=v end
+        fresh[field]=false; s.fresh(fresh); s.step(2); assert(s.sent()==0)
+    end
+end)
+
+test('manual heat replacement suppresses duplicate automatic request after key release', function()
+    local s=scenario(); s.row.ammo_path='weapon_heat'
+    s.row.heat_verified=true; s.row.heat_requires_replacement=true; s.row.heat_overheated=true
+    s.step(0); s.state.keys.R=true; s.step(.5); s.state.keys.R=false
+    s.step(2); s.step(5); assert(s.sent()==0)
+    s.state.lmb_edge_time=6; s.step(6); assert(s.sent()==1)
+end)
+
+test('heat unlock rearms next episode without claiming confirmed reload', function()
+    local s=scenario(); s.row.ammo_path='weapon_heat'
+    s.row.heat_verified=true; s.row.heat_requires_replacement=true; s.row.heat_overheated=true
+    s.step(0); s.step(1); assert(s.sent()==1)
+    s.row.heat_overheated=false; s.step(2)
+    assert(table.concat(s.logs,'\n'):find('HEAT_LOCK_CLEARED_AFTER_REQUEST',1,true))
+    s.row.heat_overheated=true; s.step(4); s.step(5); assert(s.sent()==2)
+end)
+
+test('native heat reader checks identity, flags and effective override', function()
+    local ffi=require('ffi')
+    local function word(v) return ffi.string(ffi.new('uint32_t[1]',v),4) end
+    local function u32(s,o) local v=ffi.new('uint32_t[1]'); ffi.copy(v,s:sub(o+1,o+4),4); return tonumber(v[0]) end
+    local function unhex(s) return (s:gsub('..',function(p) return string.char(tonumber(p,16)) end)) end
+    local function hex(s) return (s:gsub('.',function(c) return string.format('%02x',c:byte()) end)) end
+    local function config(burned)
+        local bytes=ffi.new('uint8_t[0x250]'); bytes[0x50]=1; bytes[0x90]=burned and 1 or 0
+        return ffi.string(bytes,0x250)
+    end
+    local memory={
+        [0x100000+0x764efa]=unhex('4c8b15471ebc02'),
+        [0x100000+0x764f79]=unhex('8bc8498b4258488d1449807c9008000f94c0'),
+        [0x40000]=string.rep('W',24),
+        [0x60000+24]=word(2)..word(0x42c80000)..'\1\0\0\0',
+        [0x70000+0x250]=config(false),
+    }
+    local pointers={[0x20040]=0x30000,[0x30010]=0x40000,[0x20058]=0x60000,[0x200a8]=0x70000}
+    local verified,override=true,nil
+    local chunk=assert(source:match('(local function read_heat_component.-)\nlocal function context_reader'))
+    local factory=assert(loadstring(chunk..'\nreturn read_heat_component'))
+    setfenv(factory,setmetatable({u32=u32,hex=hex,component_static_record=function(_,_,name)
+        assert(name=='heat'); if verified then return config(true) end
+    end},{__index=_G}))
+    local reader=factory()
+    local e={game=0x100000,weapon_id=42,weapon=string.rep('W',24),
+        global=function(rva) assert(rva==0x3326d48); return 0x20000 end,
+        lookup=function(address,id) assert(id==42); if address==0x20028 then return 2 end
+            assert(address==0x20068); return override end,
+        pointer=function(address,guard) assert(guard); return assert(pointers[address]) end,
+        read=function(address,size) local s=assert(memory[address]); assert(#s==size); return s end}
+    local row={}; reader(e,row); assert(row.heat_verified and row.heat_overheated and row.heat_requires_replacement)
+    assert(row.heat_spares==2 and row.ammo_status=='heat_sink_burned_out')
+    override=1; row={}; reader(e,row); assert(not row.heat_requires_replacement and row.ammo_status=='heat_cooling_lock')
+    memory[0x40000]=string.rep('X',24); assert(not pcall(reader,e,{})); memory[0x40000]=e.weapon
+    memory[0x60018]=word(2)..word(0)..'\2\0\0\0'; assert(not pcall(reader,e,{}))
+    verified=false; row={}; reader(e,row); assert(not row.heat_verified)
+    memory[0x100000+0x764efa]=string.rep('\0',7); assert(not pcall(reader,e,{}))
+end)
+
 test('explicit attack retries after request cooldown', function()
     local s=scenario(); s.step(0); s.step(3)
     s.state.lmb_edge_time=3.5; s.step(3.5); assert(s.sent()==1)

@@ -1,13 +1,13 @@
 -- HD2-Addon: mods/liu/auto_reload_rounds
 
--- Auto Reload for build 24826606: read-only ammo state, native R input.
+-- Auto Reload for build 25327279: read-only ammo state, native R input.
 -- The entity/component layout is adapted from etxp/HD2-C4-Quick-Actions
 -- (MIT); C4-specific action calls and all memory writes are deliberately removed.
 local existing = rawget(_G, 'LiuAutoReloadRounds')
 if existing then return existing end
 
 local RELOAD_DELAY_SECONDS = 1
-local state = {revision = 'auto-reload-4', ticks = 0, elapsed = 0, snapshots = 0,
+local state = {revision = 'auto-reload-5', ticks = 0, elapsed = 0, snapshots = 0,
     latest_row = nil,
     lmb_edge_time = nil, empty_since = nil, attempted = false, identity = nil}
 -- Reported by the tester as crash-prone while being equipped. Keep it out of
@@ -127,18 +127,18 @@ local function read_api()
     return api
 end
 
-local magazine_static_records
+local magazine_static_records, component_static_record
 
 local function read_magazine_component(e, row)
-    -- Evidence: v2 AMMO_QUERY_CODE, 0x73d062..0x73d113. No game calls.
-    assert(e.read(e.game + 0x73d062, 7) == '\x48\x8b\x2d\x0f\xf3\x02\x02',
+    -- Build 25327279 ammo query 0x744d02..0x744db7. No game calls.
+    assert(e.read(e.game + 0x744d02, 7) == '\x48\x8b\x2d\x3f\x19\xbe\x02',
         'magazine_native_signature_mismatch')
-    assert(hex(e.read(e.game + 0x73d0cc, 76)) ==
-        '488b4d38488bdf48c1e30448035d48488b0cf9e8dc1bdbff80b89c000000007420488b4550488d0c7f807c880800750a837b08000f85b600000032c0e9b1000000833b000f9fc0e9a6000000',
+    assert(hex(e.read(e.game + 0x744d6c, 76)) ==
+        '488b4d38488bdf48c1e30448035d48488b0cf9e8bce9daff80b89c000000007420488b4550488d0c7f807c880800750a837b08000f85b600000032c0e9b1000000833b000f9fc0e9a6000000',
         'magazine_native_layout_mismatch')
     local records = assert(magazine_static_records, 'magazine_maps_not_built')(e, row)
     if not records then row.ammo_status = 'magazine_static_identity_unverified'; return end
-    local manager = e.global(0x276c378)
+    local manager = e.global(0x3326648)
     local index = e.lookup(manager + 0x20, e.weapon_id, 65536)
     if not index then row.ammo_status = 'magazine_component_missing'; return end
     assert(index < 4096, 'magazine_component_index_invalid')
@@ -159,6 +159,42 @@ local function read_magazine_component(e, row)
     -- A blocked chamber containing a round is not sufficient to request R.
     row.ammo_status = count == 0 and token == 0 and 'magazine_and_chamber_empty' or 'ammo_present'
     row.ammo_counter_semantics = 'native_magazine_count_and_chamber_token'
+end
+
+local function read_heat_component(e, row)
+    -- Build 25327279: 0x764ee0 separates action inhibition from Heat +8.
+    assert(hex(e.read(e.game + 0x764efa, 7)) == '4c8b15471ebc02',
+        'heat_native_manager_mismatch')
+    assert(hex(e.read(e.game + 0x764f79, 18)) == '8bc8498b4258488d1449807c9008000f94c0',
+        'heat_native_layout_mismatch')
+    local config = assert(component_static_record, 'heat_maps_not_built')(e, row, 'heat')
+    if not config then row.ammo_status = 'heat_static_identity_unverified'; return end
+    local manager = e.global(0x3326d48)
+    local index = e.lookup(manager + 0x28, e.weapon_id, 65536)
+    if not index then row.ammo_status = 'heat_component_missing'; return end
+    assert(index < 4096, 'heat_component_index_invalid')
+    local registry = e.pointer(manager + 0x40, true)
+    assert(e.read(e.pointer(registry + index * 8, true), 24, true) == e.weapon,
+        'heat_component_identity_mismatch')
+    local override = e.lookup(manager + 0x68, e.weapon_id, 65536)
+    if override then
+        assert(override < 4096, 'heat_override_index_invalid')
+        config = e.read(e.pointer(manager + 0xa8, true) + override * 0x250, 0x250, true)
+    end
+    local runtime = e.read(e.pointer(manager + 0x58, true) + index * 12, 12, true)
+    local locked = runtime:byte(9)
+    assert(locked == 0 or locked == 1, 'heat_overheat_flag_invalid')
+    assert(config:byte(0x51) <= 1 and config:byte(0x91) <= 1, 'heat_config_flags_invalid')
+    row.heat_verified = true
+    row.heat_overheated = locked == 1
+    -- +0x90 prevents automatic cooling/lock clearing in 0x762f60.
+    -- Cooling weapons must not discard a usable heat sink just for being hot.
+    row.heat_requires_replacement = config:byte(0x51) == 1 and config:byte(0x91) == 1
+    row.heat_spares = u32(runtime, 0)
+    row.heat_value_bits = hex(runtime:sub(5, 8))
+    row.heat_config_source = override and 'entity_override' or 'resource_template'
+    row.ammo_status = row.heat_overheated and
+        (row.heat_requires_replacement and 'heat_sink_burned_out' or 'heat_cooling_lock') or 'heat_ready'
 end
 
 local function context_reader(api, game, extend)
@@ -208,37 +244,30 @@ local function context_reader(api, game, extend)
         selected_slot = 'UNKNOWN', selected_entity_id = 'UNKNOWN',
         ammo_path = 'UNKNOWN', ammo_status = 'unresolved',
     }
-    local mode = read(global(0x276c3d0), 0x44, true)
-    if u32(mode, 8) == 0 or u32(mode, 0x40) < 1 or u32(mode, 0x40) > 7 then
-        return finish(row, 'waiting_for_mission')
-    end
-    local player_manager = global(0x276c190)
+    local player_manager = global(0x3326468)
     local counts = read(player_manager + 0x84, 8, true)
     if u32(counts, 0) == 0 or u32(counts, 4) == 0 then
         return finish(row, 'waiting_for_local_player')
     end
     local player = read(pointer(player_manager + 0xe8, true), 24, true)
     if bit.band(player:byte(21), 1) == 0 then return finish(row, 'local_player_not_owned') end
+    -- Native local-player registry and player-to-avatar accessor 0x606630.
+    local player_index = lookup(player_manager + 0xd0, u32(player, 8), 64)
+    if player_index ~= 0 then return finish(row, 'local_player_registry_mismatch') end
     local avatar_unit = u32(read(player_manager + 0x3a8, 4, true), 0)
     if avatar_unit == 0x7fff then return finish(row, 'waiting_for_avatar') end
 
-    local owner = global(0x276f0c0)
-    local entity_index = lookup(owner + 0xf21a88, avatar_unit, 1048576)
+    local owner = global(0x346bf98)
+    local entity_index = lookup(owner + 0xf22ec8, avatar_unit, 1048576)
     if not entity_index then return finish(row, 'avatar_map_missing') end
-    local entity = read(owner + 0xf31ad8 + entity_index * 24, 24, true)
+    assert(entity_index < 1048576, 'avatar_entity_index_invalid')
+    local entity = read(owner + 0xf32f18 + entity_index * 24, 24, true)
+    if u32(entity, 16) ~= avatar_unit then return finish(row, 'avatar_unit_mismatch') end
     if bit.band(entity:byte(21), 1) == 0 then return finish(row, 'avatar_not_owned') end
     local entity_id = u32(entity, 8)
     row.local_entity_id = entity_id
 
-    local avatar = global(0x276ca30)
-    local avatar_index = lookup(avatar + 0xf8, entity_id, 64)
-    local avatar_count = u32(read(avatar + 0x6c, 4, true), 0)
-    if not avatar_index or avatar_index >= avatar_count then return finish(row, 'avatar_registry_missing') end
-    if read(pointer(avatar + 0x110 + avatar_index * 8, true), 24, true) ~= entity then
-        return finish(row, 'avatar_registry_mismatch')
-    end
-
-    local inventory = global(0x276c468)
+    local inventory = global(0x3326738)
     local inventory_index = lookup(inventory + 0x28, entity_id, 65536)
     local inventory_count = u32(read(inventory + 0x14, 4, true), 0)
     if not inventory_index or inventory_index >= inventory_count then return finish(row, 'inventory_missing') end
@@ -254,9 +283,10 @@ local function context_reader(api, game, extend)
     row.selected_entity_id = weapon_id
     if weapon_id == 0 or weapon_id == INVALID then return finish(row, 'selected_entity_missing') end
 
-    local weapon_index = lookup(owner + 0xf19a70, weapon_id, 1048576)
+    local weapon_index = lookup(owner + 0xf1aeb0, weapon_id, 1048576)
     if not weapon_index then return finish(row, 'weapon_map_missing') end
-    local weapon = read(owner + 0xf31ad8 + weapon_index * 24, 24, true)
+    assert(weapon_index < 1048576, 'weapon_entity_index_invalid')
+    local weapon = read(owner + 0xf32f18 + weapon_index * 24, 24, true)
     if u32(weapon, 8) ~= weapon_id then return finish(row, 'weapon_identity_mismatch') end
     row.current_weapon_resource = resource(weapon)
     row.current_weapon = row.current_weapon_resource
@@ -264,25 +294,10 @@ local function context_reader(api, game, extend)
     if unsafe_resources[row.current_weapon_resource] then return finish(row, 'unsafe_resource') end
     if not row.weapon_owned then return finish(row, 'weapon_not_owned') end
 
-    local weapon_data = global(0x276c9f0)
-    local data_index = lookup(weapon_data + 0x30, weapon_id, 65536)
-    row.weapon_data_status = data_index and 'present' or 'missing'
-    if data_index then
-        local data_count = u32(read(weapon_data + 0x1c, 4, true), 0)
-        if data_index >= data_count then return finish(row, 'weapon_data_index_invalid') end
-        if read(pointer(pointer(weapon_data + 0x48, true) + data_index * 8, true), 24, true) ~= weapon then
-            return finish(row, 'weapon_data_owner_mismatch')
-        end
-        local types = read(pointer(weapon_data + 0x58, true) + data_index * 0x3e0 + 0x340, 16, true)
-        local packed = read(pointer(weapon_data + 0x60, true) + data_index * 12, 12, true)
-        row.weapon_function_types = hex(types)
-        row.weapon_state_12 = hex(packed)
-        row.weapon_state_flags = hex(read(pointer(weapon_data + 0x50, true) + data_index * 2, 2, true))
-    end
-
-    local weapon_manager = global(0x276c390)
+    local weapon_manager = global(0x3326660)
     local weapon_component = lookup(weapon_manager + 0x28, weapon_id, 65536)
     if not weapon_component then return finish(row, 'weapon_driver_missing') end
+    assert(weapon_component < 4096, 'weapon_driver_index_invalid')
     if read(pointer(pointer(weapon_manager + 0x40, true) + weapon_component * 8, true), 24, true) ~= weapon then
         return finish(row, 'weapon_driver_identity_mismatch')
     end
@@ -296,9 +311,10 @@ local function context_reader(api, game, extend)
     else row.ammo_path = 'no_native_ammo_component' end
 
     if row.ammo_path == 'weapon_rounds' then
-        local rounds_manager = global(0x276ca00)
+        local rounds_manager = global(0x3326cf0)
         local rounds_index = lookup(rounds_manager + 0x28, weapon_id, 65536)
         if not rounds_index then return finish(row, 'rounds_component_missing') end
+        assert(rounds_index < 4096, 'rounds_component_index_invalid')
         if read(pointer(pointer(rounds_manager + 0x40, true) + rounds_index * 8, true), 24, true) ~= weapon then
             return finish(row, 'rounds_component_identity_mismatch')
         end
@@ -312,26 +328,17 @@ local function context_reader(api, game, extend)
         row.rounds_chamber_blocked = runtime:byte(0x11) ~= 0
         row.ammo_counter_semantics = 'selected_magazine_only_not_backpack_or_chamber'
         row.ammo_status = row.rounds_magazine_count > 0 and 'magazine_nonempty' or 'magazine_empty'
-        local override = lookup(rounds_manager + 0x68, weapon_id, 65536)
-        local config
-        if override then
-            config = read(pointer(rounds_manager + 0xa8, true) + override * 0x84, 0x84, true)
-            row.rounds_config_source = 'entity_override'
-        else
-            local templates = pointer(owner + 0xf113a8, true)
-            local start = 0
-            for i = 8, 1, -1 do start = (start * 256 + weapon:byte(i)) % 46 end
-            for probe = 0, 45 do
-                local entry = read(templates + ((start + probe) % 46) * 16, 16, true)
-                local key = resource(entry)
-                if key == '0000000000000000' then break end
-                if key == row.current_weapon_resource then
-                    local index = u32(entry, 8)
-                    if index < 46 then config = read(templates + 0x2e0 + index * 0x84, 0x84, true) end
-                    break
-                end
+        local e = {read=read, pointer=pointer, lookup=lookup, owner=owner, weapon_id=weapon_id}
+        local config = component_static_record(e, row, 'rounds')
+        if config then
+            local override = lookup(rounds_manager + 0x68, weapon_id, 65536)
+            if override then
+                assert(override < 4096, 'rounds_override_index_invalid')
+                config = read(pointer(rounds_manager + 0xa8, true) + override * 0x88, 0x88, true)
+                row.rounds_config_source = 'entity_override'
+            else
+                row.rounds_config_source = 'resource_template'
             end
-            row.rounds_config_source = 'resource_template'
         end
         if config then
             row.rounds_chambered = config:byte(0x69) ~= 0
@@ -344,30 +351,10 @@ local function context_reader(api, game, extend)
             row.rounds_config_source = 'missing'
         end
     elseif row.ammo_path == 'weapon_resource' then
-        local resource_manager = global(0x276c7c0)
-        local resource_index = lookup(resource_manager + 0x20, weapon_id, 65536)
-        if resource_index then
-            local provider = u32(read(pointer(resource_manager + 0x48, true) + resource_index * 36, 4, true), 0)
-            row.resource_provider = provider
-            if provider ~= 0 and provider ~= INVALID and provider ~= 0x7fff then
-                local counter_manager = global(0x276c318)
-                local counter_index = lookup(counter_manager + 0x20, provider, 65536)
-                if counter_index then
-                    row.resource_count = u32(read(pointer(counter_manager + 0x50, true) + counter_index * 8, 8, true), 0)
-                    row.ammo_status = row.resource_count > 0 and 'resource_available' or 'resource_empty'
-                else
-                    row.resource_count = 'boolean_provider_unresolved'
-                    row.ammo_status = 'resource_provider_unresolved'
-                end
-            else
-                row.resource_count = 0
-                row.ammo_status = 'resource_empty'
-            end
-        else
-            row.ammo_status = 'resource_component_missing'
-        end
+        row.ammo_status = 'unsupported_resource_component'
     elseif row.ammo_path == 'weapon_heat' then
-        row.ammo_status = 'heat_runtime_unverified'
+        read_heat_component({read=read, pointer=pointer, global=global, lookup=lookup,
+            game=game, owner=owner, weapon_id=weapon_id, weapon=weapon}, row)
     elseif row.ammo_path == 'weapon_magazine' then
         read_magazine_component({read=read, pointer=pointer, global=global, lookup=lookup,
             game=game, owner=owner, weapon_id=weapon_id, weapon=weapon}, row)
@@ -378,10 +365,33 @@ local function context_reader(api, game, extend)
     row._weapon_bytes = weapon
     row._weapon_id = weapon_id
     row._game_owner = owner
-    row.ammo_action_policy = row.ammo_path == 'weapon_heat' and 'HEAT_DIAGNOSTIC_PENDING' or
+    row.ammo_action_policy = row.ammo_path == 'weapon_heat' and (row.heat_verified and row.heat_requires_replacement and 'NATIVE_R_ONLY_CANDIDATE' or 'SKIP_COOLING_OR_UNVERIFIED_HEAT') or
         row.ammo_path == 'weapon_magazine' and (row.magazine_verified and 'NATIVE_R_ONLY_CANDIDATE' or 'SKIP_UNVERIFIED_MAGAZINE') or
+        row.ammo_path == 'weapon_resource' and 'SKIP_UNSUPPORTED_RESOURCE' or
         row.ammo_path == 'no_native_ammo_component' and 'SKIP_UNKNOWN' or 'NATIVE_R_ONLY_CANDIDATE'
     return finish(row, 'context_observed')
+end
+
+local function verify_layout(api, game)
+    -- Internal instructions, not function entry points commonly hooked by mods.
+    for _,signature in ipairs({
+        {0x607200, '488b0561f2d10283b88400000000'}, -- local player global/count
+        {0x6066ed, '8b9410a8030000'}, -- avatar unit, player index *32
+        {0xfd9c93, '4c8b15fe224902'}, -- owner global
+        {0xfd9cc5, '498b9ac82ef200'}, -- unit -> entity map
+        {0xfd9d1c, '488d80e3651e00498d04c2'}, -- entity array stride/base
+        {0xfd9d83, '498b9ab0aef100'}, -- entity id -> entity map
+        {0x9a83e0, '4c8b1551e39702'}, -- inventory global
+        {0x9a846f, '488d1440498b42504803d2448b4cd01c'}, -- selected inventory slot
+        {0x745db6, '488b1da308be02'}, -- driver global
+        {0x744dc2, '4c8b0d271fbe02'}, -- rounds global
+        {0x4fddc2, '4869c088000000'}, -- rounds effective config stride
+        {0x76307f, '44386f5074640f2f7760725e488b4658c644a80801'}, -- overheat latch set
+        {0x7630ac, 'f30f1047640f2fc6723380bf9000000000752a488b4658c644a80800'}, -- latch clear
+    }) do
+        assert(hex(assert(api.read(game + signature[1], #signature[2] / 2), 'layout_code_unavailable')) ==
+            signature[2], string.format('unsupported_layout_at_%x', signature[1]))
+    end
 end
 
 local api, game
@@ -393,14 +403,15 @@ local setup_ok, setup_error = pcall(function()
     local pe_offset = u32(dos, 0x3c)
     assert(pe_offset < 0x1000, 'module_pe_offset_invalid')
     local pe = assert(api.read(game + pe_offset, 0x60), 'module_pe_unavailable')
-    assert(pe:sub(1, 4) == 'PE\0\0' and u32(pe, 8) == 0x6a86132e and
-        u32(pe, 0x50) == 0x3a6b000, 'unsupported_game_build')
-    emit(string.format('SETUP game_base=0x%X read_only=true build=24826606', game))
+    assert(pe:sub(1, 4) == 'PE\0\0' and u32(pe, 8) == 0x6aa96b14 and
+        u32(pe, 0x50) == 0x4770000, 'unsupported_game_build')
+    verify_layout(api, game)
+    emit(string.format('SETUP game_base=0x%X read_only=true build=25327279', game))
     -- One known ammo query, identified by the reference project's native
     -- analysis. Capture for offline disassembly only; never execute these bytes.
-    local query = api.read(game + 0x73cf80, 0x660)
+    local query = api.read(game + 0x744c20, 0x660)
     if query then
-        emit('AMMO_QUERY_CODE rva=0x73cf80 bytes=' .. hex(query))
+        emit('AMMO_QUERY_CODE rva=0x744c20 bytes=' .. hex(query))
     else
         emit('AMMO_QUERY_CODE_UNAVAILABLE')
     end
@@ -430,6 +441,12 @@ local function log_row(row, error_message, phase)
         'magazine_chamber=' .. scalar(row.magazine_chamber_token),
         'magazine_blocked=' .. scalar(row.magazine_chamber_blocked),
         'magazine_verified=' .. scalar(row.magazine_verified),
+        'heat_verified=' .. scalar(row.heat_verified),
+        'heat_overheated=' .. scalar(row.heat_overheated),
+        'heat_requires_replacement=' .. scalar(row.heat_requires_replacement),
+        'heat_spares=' .. scalar(row.heat_spares),
+        'heat_value_bits=' .. scalar(row.heat_value_bits),
+        'heat_config_source=' .. scalar(row.heat_config_source),
         'selected_mag=' .. scalar(row.rounds_selected_magazine),
         'chamber_token=' .. scalar(row.rounds_chamber_token),
         'chambered=' .. scalar(row.rounds_chambered),
@@ -446,9 +463,8 @@ local function log_row(row, error_message, phase)
     emit(table.concat(fields, ' '))
 end
 
--- Build-time injection point for the exact WeaponMagazineComponent and
--- WeaponReloadComponent map fingerprints from the reviewed reference Mod.
--- The generated probe only performs bounded read-only table/record checks.
+-- Exact build-specific Magazine/Rounds/Heat resource maps, independently
+-- located through their native getters. Full map and record identity checks.
 local static_component_snapshot = function() end
 -- STATIC_COMPONENT_READER_INSERT
 
@@ -514,6 +530,10 @@ local function rounds_empty(row)
         return row.magazine_verified == true and row.magazine_count == 0 and
             row.magazine_chamber_token == 0
     end
+    if row.ammo_path == 'weapon_heat' then
+        return row.heat_verified == true and row.heat_requires_replacement == true and
+            row.heat_overheated == true
+    end
     if row.ammo_path ~= 'weapon_rounds' then return false end
     if type(row.rounds_chambered) ~= 'boolean' then return false end
     if row.rounds_chambered then
@@ -532,6 +552,10 @@ local function reload_request(reason)
     local ok_read, fresh = pcall(context_reader, api, game)
     if not ok_read or not rounds_empty(fresh) or fresh.weapon_owned ~= true or
         fresh.selected_entity_id ~= state.latest_row.selected_entity_id or
+        fresh.selected_slot ~= state.latest_row.selected_slot or
+        fresh.ammo_path ~= state.latest_row.ammo_path or
+        fresh._weapon_bytes ~= state.latest_row._weapon_bytes or
+        fresh.local_entity_id ~= state.latest_row.local_entity_id or
         fresh.current_weapon_resource ~= state.latest_row.current_weapon_resource then return end
     state.last_request = state.elapsed
     local ok, detail = api.send_reload()
@@ -547,14 +571,16 @@ end
 local function auto_reload_step()
     local row = state.latest_row
     if not row or row.context_status ~= 'context_observed' or
-        (row.ammo_path ~= 'weapon_rounds' and row.ammo_path ~= 'weapon_magazine') or row.weapon_owned ~= true or
+        (row.ammo_path ~= 'weapon_rounds' and row.ammo_path ~= 'weapon_magazine' and row.ammo_path ~= 'weapon_heat') or row.weapon_owned ~= true or
+        (row.ammo_path == 'weapon_heat' and (row.heat_verified ~= true or row.heat_requires_replacement ~= true)) or
         not state.latest_at or state.elapsed - state.latest_at > 0.25 or
         unsafe_resources[row.current_weapon_resource] or not api.game_focused() then
         state.identity, state.empty_since, state.attempted = nil, nil, false
         state.lmb_edge_time, state.request_at = nil, nil
         return
     end
-    local identity = tostring(row.current_weapon_resource) .. ':' .. tostring(row.selected_entity_id)
+    local identity = tostring(row.current_weapon_resource) .. ':' .. tostring(row.selected_entity_id) ..
+        ':' .. tostring(row.selected_slot) .. ':' .. tostring(row._weapon_bytes) .. ':' .. tostring(row.local_entity_id)
     if identity ~= state.identity then
         state.identity, state.empty_since, state.attempted = identity, nil, false
         state.request_at = nil
@@ -562,6 +588,15 @@ local function auto_reload_step()
             ' entity=' .. tostring(row.selected_entity_id) .. ' policy=' .. row.ammo_path)
     end
     if rounds_empty(row) then
+        if state.keys and state.keys.R then
+            -- The user has already requested replacement for this episode.
+            -- Do not duplicate their request as soon as they release the key.
+            state.empty_since = state.elapsed
+            state.attempted = true
+            state.last_request = state.elapsed
+            state.lmb_edge_time, state.request_at = nil, nil
+            return
+        end
         if not state.empty_since then
             state.empty_since = state.elapsed
             emit('EMPTY_BEGIN tick=' .. state.ticks .. ' elapsed=' .. string.format('%.3f', state.elapsed) ..
@@ -572,6 +607,10 @@ local function auto_reload_step()
         if state.request_at and state.elapsed - state.request_at >= 8 then
             emit('RELOAD_UNCONFIRMED reason=still_empty_after_8_seconds retry=press_attack')
             state.request_at = nil
+        end
+        if row.ammo_path == 'weapon_heat' and state.elapsed - state.empty_since < RELOAD_DELAY_SECONDS then
+            -- Heat always waits a full second, including held fire/attack edges.
+            return
         end
         if state.lmb_edge_time and state.elapsed - state.lmb_edge_time <= 0.25 and
             state.lmb_edge_time >= state.empty_since then
@@ -584,6 +623,10 @@ local function auto_reload_step()
             reload_request('empty_1_second')
         end
     else
+        if state.request_at and row.ammo_path == 'weapon_heat' and row.heat_verified and not row.heat_overheated then
+            emit('HEAT_LOCK_CLEARED_AFTER_REQUEST reload_animation_not_verified=true')
+            state.request_at = nil
+        end
         if state.request_at and ((row.magazine_count or row.rounds_magazine_count or 0) > 0 or
             (row.magazine_chamber_token or row.rounds_chamber_token or 0) > 0) then
             emit('AMMO_RECOVERED_AFTER_REQUEST reload_animation_not_verified=true')
@@ -602,7 +645,7 @@ local function auto_reload_step()
     end
 end
 
-emit('START revision=' .. state.revision .. ' reload_delay=1 heat_diagnostic=true rounds_and_magazine=true no_native_calls=true no_memory_writes=true input_injection=true')
+emit('START revision=' .. state.revision .. ' reload_delay=1 heat_overheat_reload=true rounds_and_magazine=true no_native_calls=true no_memory_writes=true input_injection=true')
 snapshot('initial')
 
 local original_update = rawget(_G, 'update')

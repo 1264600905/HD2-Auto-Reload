@@ -4,11 +4,15 @@
   [etxp/HD2-C4-Quick-Actions](https://github.com/etxp/HD2-C4-Quick-Actions), MIT.
   The required notice is retained in `LICENSES/HD2-C4-Quick-Actions-MIT.txt`.
   C4 action invocation and memory-writing code are not included.
-- `data/*.map.hex` are byte-for-byte hexadecimal encodings of the Magazine and
+- The historical `data/WeaponMagazineComponent.map.hex` and
+  `data/WeaponReloadComponent.map.hex` are hexadecimal encodings of the Magazine and
   Reload resource-map fingerprints extracted from the local release of
   [starmatch666-droid/Directional-Shield-Hammer](https://github.com/starmatch666-droid/Directional-Shield-Hammer).
   They are reference data for exact identity checks, not its modification logic.
   No additional license for these reference data is asserted here.
+- `data/*.25327279.map.hex` are resource-ID/index tables read locally from build
+  25327279 after independently identifying the native getters. They contain no
+  game executable code or asset payloads and serve only exact identity checks.
 - The addon declaration, archive format and manifest are compatible with Bingus
   Shared Loader. The package encoder was separated from the existing shared-loader
   workspace. The loader itself, its game assets and other mods are not bundled.
