@@ -1,5 +1,7 @@
 # HD2 Auto Reload
 
+![HD2 Auto Reload mod cover](HD2-Auto-Reload-cover.png)
+
 Helldivers 2 自动换弹 Mod，依赖 **Bingus Shared Loader v15+ / API 1**。
 本仓库独立维护自动换弹源码、打包工具和测试，不包含 Loader 或其他 Mod 项目。
 
