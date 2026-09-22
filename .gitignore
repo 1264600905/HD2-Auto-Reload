@@ -1,0 +1,11 @@
+/build/
+/tools/
+__pycache__/
+*.pyc
+*.log
+*.ljbc
+.env
+.env.*
+*.dmp
+*.dll
+*.exe
