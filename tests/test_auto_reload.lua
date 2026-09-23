@@ -109,7 +109,7 @@ test('new rounds thresholds use magazine count and AC-8 stays single request', f
     s.row.rounds_magazine_count=9; assert(not s.empty(s.row))
     s.row.current_weapon_resource='a8cffb316f0b5c5f' -- AC-8
     s.row.rounds_magazine_count=1; assert(s.empty(s.row))
-    s.continuous_step(0); assert(s.sent()==0)
+    s.continuous_step(0); assert(s.sent()==1)
     s.continuous_step(1); assert(s.sent()==1)
     s.continuous_step(1.2); assert(s.sent()==1)
 end)
@@ -211,15 +211,61 @@ test('continuous loading also waits after each rapid attack click', function()
     s.continuous_step(.701); assert(s.sent()==2)
 end)
 
-test('one round keeps the existing immediate tactical path', function()
+test('one tactical round sends R in the observing update without a click', function()
     local s=scenario(true); s.row.current_weapon_resource='dcd1c835407ef7ba'
     s.row.rounds_chambered=true; s.row.rounds_chamber_token=259
     s.row.rounds_magazine_count=0 -- total ammo is one
-    s.click(0); s.continuous_step(0); assert(s.sent()==1)
+    s.continuous_step(0); assert(s.sent()==1)
     local m=scenario(true); m.row.ammo_path='weapon_magazine'; m.row.magazine_verified=true
     m.row.current_weapon_resource='05d8d8c073b9d502'; m.row.magazine_count=1
     m.row.magazine_chamber_token=259
-    m.click(0); m.step(0); assert(m.sent()==1)
+    m.step(0); assert(m.sent()==1)
+end)
+
+test('one round overrides rapid-click wait and prior tactical request', function()
+    local s=scenario(true); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
+    s.row.current_weapon_resource='05d8d8c073b9d502'
+    s.row.magazine_count=8; s.row.magazine_chamber_token=259
+    s.click(0); s.step(0); s.step(.101); assert(s.sent()==1)
+    s.click(.2); s.step(.2); s.row.magazine_count=1
+    s.step(.21); assert(s.sent()==2)
+    s.step(.3); s.step(1); assert(s.sent()==2)
+end)
+
+test('one-round request waits for our key release and rearms on ammo change', function()
+    local s=scenario(true); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
+    s.row.current_weapon_resource='89c5493e08ca4207' -- APW-1
+    s.row.magazine_count=1; s.row.magazine_chamber_token=259
+    s.own_key(true); s.step(0); assert(s.sent()==0)
+    s.own_key(false); s.step(.081); assert(s.sent()==1)
+    s.step(1); assert(s.sent()==1)
+    s.row.magazine_count=2; s.step(2)
+    s.row.magazine_count=1; s.step(3); assert(s.sent()==2)
+end)
+
+test('one-round request rejects a fresh count that already changed', function()
+    local s=scenario(true); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
+    s.row.current_weapon_resource='05d8d8c073b9d502'
+    s.row.magazine_count=1; s.row.magazine_chamber_token=259
+    local fresh={}; for k,v in pairs(s.row) do fresh[k]=v end
+    fresh.magazine_count=0; s.fresh(fresh)
+    s.step(0); s.step(.1); assert(s.sent()==0)
+end)
+
+test('manual R still suppresses the one-round tactical request', function()
+    local s=scenario(true); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
+    s.row.current_weapon_resource='89c5493e08ca4207'
+    s.row.magazine_count=1; s.row.magazine_chamber_token=259
+    s.state.keys.R=true; s.step(0); assert(s.sent()==0)
+    s.state.keys.R=false; s.step(.1); assert(s.sent()==0)
+end)
+
+test('zero rounds keep the old timed path', function()
+    local s=scenario(true); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
+    s.row.current_weapon_resource='b6aff2195568767f' -- R-36, limit zero
+    s.row.magazine_count=0; s.row.magazine_chamber_token=259
+    s.step(0); s.step(.99); assert(s.sent()==0)
+    s.step(1); assert(s.sent()==1)
 end)
 test('held fire triggers after empty observation', function()
     local s=scenario(); s.state.keys.LMB=true; s.step(0); s.step(.16); assert(s.sent()==1)

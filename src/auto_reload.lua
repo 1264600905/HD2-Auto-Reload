@@ -12,10 +12,11 @@ local CONTINUOUS_RELOAD_INTERVAL_SECONDS = 0.1
 local TACTICAL_RAPID_CLICK_WINDOW_SECONDS = 0.5
 local TACTICAL_CLICK_DELAYS = {0.1, 0.2, 0.4, 0.6}
 -- RELOAD_CONFIG_INSERT
-local state = {revision = DEBUG and 'auto-reload-configurable-click-delay-25327279-debug' or 'auto-reload-configurable-click-delay-25327279',
+local state = {revision = DEBUG and 'auto-reload-configurable-fast-one-25327279-debug' or 'auto-reload-configurable-fast-one-25327279',
     ticks = 0, elapsed = 0, snapshots = 0,
     latest_row = nil,
-    lmb_edge_time = nil, empty_since = nil, attempted = false, identity = nil}
+    lmb_edge_time = nil, empty_since = nil, attempted = false, identity = nil,
+    critical_one_requested = false}
 -- MG-43's earlier crash report remains unresolved. Its guarded Magazine
 -- reader path is enabled experimentally at the user's request.
 local unsafe_resources = {}
@@ -668,16 +669,17 @@ local function fresh_context_matches(row, fresh)
         fresh.current_weapon_resource == row.current_weapon_resource
 end
 
-local function reload_request(reason)
+local function reload_request(reason, expected_tactical_count)
     debug_emit(string.format('DEBUG_RELOAD_ENTER tick=%d elapsed=%.3f reason=%s resource=%s',
         state.ticks, state.elapsed, reason,
         tostring(state.latest_row and state.latest_row.current_weapon_resource)))
-    if state.attempted and reason ~= 'empty_attack' and reason ~= 'tactical_idle' then
+    if state.attempted and reason ~= 'empty_attack' and reason ~= 'tactical_idle' and
+        reason ~= 'tactical_last_round' then
         debug_emit('DEBUG_RELOAD_SKIP reason=already_attempted')
         return
     end
-    local minimum_interval = reason == 'tactical_idle' and
-        CONTINUOUS_RELOAD_INTERVAL_SECONDS or 2
+    local minimum_interval = reason == 'tactical_last_round' and 0 or
+        reason == 'tactical_idle' and CONTINUOUS_RELOAD_INTERVAL_SECONDS or 2
     if state.last_request and state.elapsed - state.last_request < minimum_interval then
         debug_emit('DEBUG_RELOAD_SKIP reason=rate_limited')
         return
@@ -699,6 +701,11 @@ local function reload_request(reason)
         scalar(type(fresh) == 'table' and fresh.context_status or fresh)))
     if not ok_read or not fresh_context_matches(state.latest_row, fresh) then
         debug_emit('DEBUG_RELOAD_SKIP reason=fresh_context_rejected')
+        return
+    end
+    if expected_tactical_count and
+        tactical_ammo_count(fresh, tactical_rule(fresh)) ~= expected_tactical_count then
+        debug_emit('DEBUG_RELOAD_SKIP reason=last_round_changed')
         return
     end
     state.last_request = state.elapsed
@@ -727,6 +734,7 @@ local function auto_reload_step()
         state.identity, state.empty_since, state.attempted = nil, nil, false
         state.lmb_edge_time, state.request_at = nil, nil
         state.manual_reload_episode = nil
+        state.critical_one_requested = false
         reset_tactical_clicks()
         return
     end
@@ -736,11 +744,15 @@ local function auto_reload_step()
         state.identity, state.empty_since, state.attempted = identity, nil, false
         state.request_at = nil
         state.manual_reload_episode = nil
+        state.critical_one_requested = false
         reset_tactical_clicks()
         emit('WEAPON_CONTEXT resource=' .. tostring(row.current_weapon_resource) ..
             ' entity=' .. tostring(row.selected_entity_id) .. ' policy=' .. row.ammo_path)
     end
     if ENABLE_TACTICAL_RELOAD then track_tactical_click() end
+    local rule = tactical_rule(row)
+    local count = tactical_ammo_count(row, rule)
+    if count ~= 1 then state.critical_one_requested = false end
     if rounds_empty(row) then
         local own_reload_visible = (api.own_reload_active and api.own_reload_active()) or
             (state.last_request and state.elapsed - state.last_request < 0.15)
@@ -766,8 +778,18 @@ local function auto_reload_step()
             state.request_at = nil
         end
         local attack_only = attack_only_resources[row.current_weapon_resource] == true
-        local rule = tactical_rule(row)
-        local count = tactical_ammo_count(row, rule)
+        if not attack_only and count == 1 then
+            -- Give the final round priority over attack and idle timers. An
+            -- accepted R is enough for this one-round episode; a failed press
+            -- can be retried after our previous key has been released.
+            if not state.manual_reload_episode and not state.critical_one_requested and
+                not (api.own_reload_active and api.own_reload_active()) then
+                if reload_request('tactical_last_round', 1) then
+                    state.critical_one_requested = true
+                end
+            end
+            return
+        end
         if not attack_only and count and count > 1 and count <= rule.limit then
             -- A new shot restarts the wait. Magazine weapons request once per
             -- click interval; per-round weapons continue in continuous_reload_step.
@@ -835,6 +857,7 @@ local function continuous_reload_step()
         state.continuous_probe_at = nil
         return
     end
+    if count == 1 then return end
     if count and count > 1 and not tactical_click_wait_finished() then return end
     local identity = tostring(row.current_weapon_resource) .. ':' .. tostring(row.selected_entity_id) ..
         ':' .. tostring(row.selected_slot) .. ':' .. tostring(row._weapon_bytes) .. ':' .. tostring(row.local_entity_id)

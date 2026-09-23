@@ -1,5 +1,10 @@
 # Changelog
 
+## immediate one-round tactical request (local test branch)
+
+- When a configured tactical threshold includes one round and that count is observed, refresh its context and exact ammo count in the same update, then request R without the attack or idle delays.
+- Bypass the ordinary two-second repeat limiter for this case while respecting manual R, pending key release and one request per one-round episode. Zero-round behavior is unchanged.
+
 ## tactical click delay (local test branch)
 
 - When tactical ammo is above one, wait 0.1 seconds after the latest attack click before R; rapid clicks within 0.5 seconds raise that wait to 0.2, 0.4 and at most 0.6 seconds.
