@@ -6,8 +6,10 @@
 local existing = rawget(_G, 'LiuAutoReloadRounds')
 if existing then return existing end
 
+local DEBUG = false -- DEBUG_BUILD_FLAG
 local RELOAD_DELAY_SECONDS = 1
-local state = {revision = 'auto-reload-5', ticks = 0, elapsed = 0, snapshots = 0,
+local state = {revision = DEBUG and 'auto-reload-0.5.1-debug' or 'auto-reload-0.5.1',
+    ticks = 0, elapsed = 0, snapshots = 0,
     latest_row = nil,
     lmb_edge_time = nil, empty_since = nil, attempted = false, identity = nil}
 -- Reported by the tester as crash-prone while being equipped. Keep it out of
@@ -26,6 +28,15 @@ local function emit(line)
     print('[AutoReload] ' .. line)
     if file then
         pcall(function() file:write(line .. '\n'); file:flush() end)
+    end
+end
+
+local function debug_emit(line)
+    if not DEBUG then return end
+    if file then
+        pcall(function() file:write(line .. '\n'); file:flush() end)
+    else
+        print('[AutoReload] ' .. line)
     end
 end
 
@@ -56,7 +67,7 @@ end
 
 local function read_api()
     local ffi = require('ffi')
-    pcall(ffi.cdef, [[
+    local cdef_ok, cdef_error = pcall(ffi.cdef, [[
         void *GetModuleHandleA(const char *name);
         void *GetCurrentProcess(void);
         int ReadProcessMemory(void *, const void *, void *, size_t, size_t *);
@@ -65,9 +76,13 @@ local function read_api()
         uint32_t GetWindowThreadProcessId(void *, uint32_t *);
         uint32_t SendInput(uint32_t, const void *, int);
         uint64_t GetTickCount64(void);
+        short GetAsyncKeyState(int key);
     ]])
+    debug_emit('DEBUG_FFI_CDEF once=true ok=' .. tostring(cdef_ok) ..
+        (cdef_ok and '' or ' error=' .. tostring(cdef_error)))
     local kernel = ffi.load('kernel32')
     local user32 = ffi.load('user32')
+    local get_async_key_state = user32.GetAsyncKeyState
     local process = kernel.GetCurrentProcess()
     local process_id = kernel.GetCurrentProcessId()
     local api = {}
@@ -100,6 +115,7 @@ local function read_api()
         user32.GetWindowThreadProcessId(window, owner)
         return tonumber(owner[0]) == tonumber(process_id)
     end
+    function api.key_state(code) return tonumber(get_async_key_state(code)) end
     local release_at
     local function key_event(up)
         local input = ffi.new('uint8_t[40]')
@@ -107,7 +123,12 @@ local function read_api()
         -- KEYEVENTF_SCANCODE; R is scan code 0x13. Keep keydown across frames.
         ffi.cast('uint16_t *', input + 10)[0] = 0x13
         ffi.cast('uint32_t *', input + 12)[0] = up and 10 or 8
-        return tonumber(user32.SendInput(1, input, 40)) == 1
+        debug_emit(string.format('DEBUG_SENDINPUT_BEGIN tick=%d elapsed=%.3f action=%s',
+            state.ticks, state.elapsed, up and 'keyup' or 'keydown'))
+        local sent = tonumber(user32.SendInput(1, input, 40))
+        debug_emit(string.format('DEBUG_SENDINPUT_END tick=%d elapsed=%.3f action=%s sent=%s',
+            state.ticks, state.elapsed, up and 'keyup' or 'keydown', tostring(sent)))
+        return sent == 1
     end
     function api.release_reload(force)
         if release_at and (force or api.now() >= release_at) then
@@ -468,10 +489,31 @@ end
 local static_component_snapshot = function() end
 -- STATIC_COMPONENT_READER_INSERT
 
+local function debug_near_empty(row)
+    return DEBUG and type(row) == 'table' and
+        ((type(row.rounds_magazine_count) == 'number' and row.rounds_magazine_count <= 1) or
+         (type(row.magazine_count) == 'number' and row.magazine_count <= 1) or
+         row.heat_overheated == true)
+end
+
 local function snapshot(phase)
     state.snapshots = state.snapshots + 1
     if not setup_ok then return end
+    local trace = DEBUG and (state.empty_since ~= nil or debug_near_empty(state.latest_row))
+    if trace then
+        debug_emit(string.format('DEBUG_SNAPSHOT_BEGIN tick=%d elapsed=%.3f phase=%s',
+            state.ticks, state.elapsed, phase))
+    end
     local ok, row, reason = pcall(context_reader, api, game)
+    if trace or debug_near_empty(row) then
+        debug_emit(string.format(
+            'DEBUG_SNAPSHOT_END tick=%d elapsed=%.3f ok=%s status=%s resource=%s mag=%s chamber=%s',
+            state.ticks, state.elapsed, tostring(ok),
+            scalar(type(row) == 'table' and row.context_status or reason),
+            scalar(type(row) == 'table' and row.current_weapon_resource),
+            scalar(type(row) == 'table' and (row.magazine_count or row.rounds_magazine_count)),
+            scalar(type(row) == 'table' and (row.magazine_chamber_token or row.rounds_chamber_token))))
+    end
     if ok and row then
         state.latest_row = row
         state.latest_at = state.elapsed
@@ -499,14 +541,9 @@ local function snapshot(phase)
 end
 
 local function input_probe()
-    local ok, ffi = pcall(require, 'ffi')
-    if not ok then return end
-    pcall(ffi.cdef, [[short GetAsyncKeyState(int key);]])
-    local ok_user, user32 = pcall(ffi.load, 'user32')
-    if not ok_user then return end
     local keys = {LMB = 0x01, RMB = 0x02, R = 0x52, F8 = 0x77}
     for name, code in pairs(keys) do
-        local value = tonumber(user32.GetAsyncKeyState(code)) or 0
+        local value = api.key_state(code) or 0
         local down = bit.band(value, 0x8000) ~= 0
         if state.keys == nil then state.keys = {} end
         if state.keys[name] ~= down then
@@ -544,21 +581,48 @@ local function rounds_empty(row)
 end
 
 local function reload_request(reason)
-    if state.attempted and reason ~= 'empty_attack' then return end
-    if state.last_request and state.elapsed - state.last_request < 2 then return end
-    if not state.latest_row or unsafe_resources[state.latest_row.current_weapon_resource] then return end
-    if state.keys and state.keys.R then return end
+    debug_emit(string.format('DEBUG_RELOAD_ENTER tick=%d elapsed=%.3f reason=%s resource=%s',
+        state.ticks, state.elapsed, reason,
+        tostring(state.latest_row and state.latest_row.current_weapon_resource)))
+    if state.attempted and reason ~= 'empty_attack' then
+        debug_emit('DEBUG_RELOAD_SKIP reason=already_attempted')
+        return
+    end
+    if state.last_request and state.elapsed - state.last_request < 2 then
+        debug_emit('DEBUG_RELOAD_SKIP reason=rate_limited')
+        return
+    end
+    if not state.latest_row or unsafe_resources[state.latest_row.current_weapon_resource] then
+        debug_emit('DEBUG_RELOAD_SKIP reason=missing_or_unsafe_context')
+        return
+    end
+    if state.keys and state.keys.R then
+        debug_emit('DEBUG_RELOAD_SKIP reason=manual_r')
+        return
+    end
     -- Refresh selection and ammo immediately before sending input.
+    debug_emit(string.format('DEBUG_RELOAD_REFRESH_BEGIN tick=%d elapsed=%.3f',
+        state.ticks, state.elapsed))
     local ok_read, fresh = pcall(context_reader, api, game)
+    debug_emit(string.format('DEBUG_RELOAD_REFRESH_END tick=%d elapsed=%.3f ok=%s status=%s',
+        state.ticks, state.elapsed, tostring(ok_read),
+        scalar(type(fresh) == 'table' and fresh.context_status or fresh)))
     if not ok_read or not rounds_empty(fresh) or fresh.weapon_owned ~= true or
         fresh.selected_entity_id ~= state.latest_row.selected_entity_id or
         fresh.selected_slot ~= state.latest_row.selected_slot or
         fresh.ammo_path ~= state.latest_row.ammo_path or
         fresh._weapon_bytes ~= state.latest_row._weapon_bytes or
         fresh.local_entity_id ~= state.latest_row.local_entity_id or
-        fresh.current_weapon_resource ~= state.latest_row.current_weapon_resource then return end
+        fresh.current_weapon_resource ~= state.latest_row.current_weapon_resource then
+        debug_emit('DEBUG_RELOAD_SKIP reason=fresh_context_rejected')
+        return
+    end
     state.last_request = state.elapsed
+    debug_emit(string.format('DEBUG_RELOAD_SEND_BEGIN tick=%d elapsed=%.3f',
+        state.ticks, state.elapsed))
     local ok, detail = api.send_reload()
+    debug_emit(string.format('DEBUG_RELOAD_SEND_END tick=%d elapsed=%.3f ok=%s detail=%s',
+        state.ticks, state.elapsed, tostring(ok), tostring(detail)))
     emit(string.format(
         'RELOAD_REQUEST tick=%d elapsed=%.3f reason=%s sent=%s detail=%s resource=%s mag=%s chamber=%s',
         state.ticks, state.elapsed, reason, tostring(ok), tostring(detail),
@@ -645,7 +709,7 @@ local function auto_reload_step()
     end
 end
 
-emit('START revision=' .. state.revision .. ' reload_delay=1 heat_overheat_reload=true rounds_and_magazine=true no_native_calls=true no_memory_writes=true input_injection=true')
+emit('START revision=' .. state.revision .. ' debug=' .. tostring(DEBUG) .. ' reload_delay=1 heat_overheat_reload=true rounds_and_magazine=true no_native_calls=true no_memory_writes=true input_injection=true')
 snapshot('initial')
 
 local original_update = rawget(_G, 'update')
@@ -656,11 +720,26 @@ local function update(dt, ...)
         state.elapsed = api.now() - state.started_at
         api.release_reload(not api.game_focused())
         input_probe()
+        if DEBUG and state.empty_since and state.lmb_edge_time and
+            state.elapsed - state.lmb_edge_time <= 0.25 then
+            debug_emit(string.format('DEBUG_EMPTY_ATTACK_FRAME tick=%d elapsed=%.3f',
+                state.ticks, state.elapsed))
+        end
         if not state.last_snapshot or state.elapsed - state.last_snapshot >= 0.05 then
             state.last_snapshot = state.elapsed
             snapshot('periodic')
         end
+        local trace_step = DEBUG and state.empty_since and state.lmb_edge_time and
+            state.elapsed - state.lmb_edge_time <= 0.25
+        if trace_step then
+            debug_emit(string.format('DEBUG_AUTO_STEP_BEGIN tick=%d elapsed=%.3f',
+                state.ticks, state.elapsed))
+        end
         auto_reload_step()
+        if trace_step then
+            debug_emit(string.format('DEBUG_AUTO_STEP_END tick=%d elapsed=%.3f',
+                state.ticks, state.elapsed))
+        end
     end
     if original_update then return original_update(dt, ...) end
 end

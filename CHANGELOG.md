@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.1
+
+- Declare `GetAsyncKeyState` once during API initialization and reuse its binding in the per-frame input probe.
+- Add a `--debug` package with focused context, reload decision and `SendInput` boundary logging.
+
 ## 0.5.0
 
 - Migrate to Steam build 25327279; reject mismatched binaries and native layouts.

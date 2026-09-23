@@ -19,7 +19,7 @@ v5 已获用户实机反馈：功能测试通过，能量武器也能自动换�
 
 ## 安装与测试
 
-从 [v0.5.0 Release](https://github.com/1264600905/HD2-Auto-Reload/releases/tag/v0.5.0) 下载 `Auto-Reload-v5.zip`，或在本地构建。旧版 v4 不支持此次游戏更新。
+从 [v0.5.1 Release](https://github.com/1264600905/HD2-Auto-Reload/releases/tag/v0.5.1) 下载 `Auto-Reload-v0.5.1.zip`，或在本地构建。旧版 v4 不支持此次游戏更新。
 在现用 Mod 管理器中替换旧 Auto Reload，保持只启用一份，再与 Bingus Shared Loader 一起部署。
 新版本沿用旧版 GUID，所以应替换旧包，不应并行安装。
 
@@ -30,7 +30,7 @@ v5 已获用户实机反馈：功能测试通过，能量武器也能自动换�
 资源 `11c27d3babb38956` 曾被报告装备后崩溃，始终跳过，不要用于测试。
 
 日志位置：`%LOCALAPPDATA%/CowboyBingus/Helldivers2/Logs/AutoReloadRounds.log`。
-版本行应含 `revision=auto-reload-5`。输入被系统接受不等于游戏完成换弹，日志会区分请求、弹药恢复与未确认结果。
+版本行应含 `revision=auto-reload-0.5.1`。输入被系统接受不等于游戏完成换弹，日志会区分请求、弹药恢复与未确认结果。
 不要将完整个人运行日志、游戏 DLL 或内存转储提交到本仓库。
 
 ## 构建
@@ -43,9 +43,16 @@ python scripts/build.py
 python scripts/build.py --game-dir '你的 Steam 游戏目录/Helldivers 2'
 ```
 
-产物为 `build/Auto-Reload-v5.zip`。`build/` 不纳入源码提交。
+产物为 `build/Auto-Reload-v0.5.1.zip`。`build/` 不纳入源码提交。
 组件 map 以十六进制文本保存在 `data/`，构建时嵌入 Lua；运行时验证完整指纹、资源记录和实体身份。
 游戏内还会验证 DLL PE 标识，以及玩家、实体、物品栏、Rounds、Magazine 和 Heat 的已核对指令片段。v5 使用新版 Magazine/Rounds/Heat 全表指纹和定点槽位。
+
+排查空仓附近闪退时可构建 `python scripts/build.py --debug`，产物为
+`build/Auto-Reload-v0.5.1-debug.zip`。调试包沿用同一 GUID，应替换普通版并重启游戏。
+日志的 `START` 行会显示 `revision=auto-reload-0.5.1-debug debug=true`；
+`DEBUG_SNAPSHOT_*`、`DEBUG_AUTO_STEP_*`、`DEBUG_RELOAD_*` 和 `DEBUG_SENDINPUT_*`
+会在接近空仓及请求换弹时记录调用边界。
+日志仍位于 `%LOCALAPPDATA%/CowboyBingus/Helldivers2/Logs/AutoReloadRounds.log`。
 
 ## 测试
 
