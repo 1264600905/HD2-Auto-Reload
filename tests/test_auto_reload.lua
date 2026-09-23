@@ -1,10 +1,12 @@
 -- Exercise the actual controller functions with synthetic observations.
 local file = assert(io.open('src/auto_reload.lua', 'rb'))
 local source = file:read('*a'); file:close()
-local controller = assert(source:match('(local function rounds_empty.-)\nemit%(%\'START'))
-local policies = assert(source:match('(local CONTINUOUS_RELOAD_INTERVAL_SECONDS =.-)\nlocal state ='))
+local built = assert(io.open('build/auto_reload_entry.lua', 'rb'))
+local generated = built:read('*a'); built:close()
+local controller = assert(generated:match('(local function truly_empty.-)\nemit%(%\'START'))
+local policies = assert(generated:match('(local CONTINUOUS_RELOAD_INTERVAL_SECONDS =.-)\nlocal state ='))
 local tests = 0
-local function scenario()
+local function scenario(tactical_enabled)
     local row = {context_status='context_observed', ammo_path='weapon_rounds',
         current_weapon_resource='safe', selected_entity_id=1, weapon_owned=true,
         rounds_magazine_count=0, rounds_chambered=false}
@@ -13,9 +15,17 @@ local function scenario()
     local api = {game_focused=function() return focused end,
         own_reload_active=function() return own_down end,
         send_reload=function() sent=sent+1; return true,'test' end}
-    local factory = assert(loadstring(policies .. '\n' .. controller ..
+    local selected_policies = policies
+    if tactical_enabled then
+        local count
+        selected_policies, count = policies:gsub('local ENABLE_TACTICAL_RELOAD = false',
+            'local ENABLE_TACTICAL_RELOAD = true')
+        assert(count == 1)
+    end
+    local factory = assert(loadstring(selected_policies .. '\n' .. controller ..
         '\nreturn auto_reload_step, rounds_empty, continuous_reload_step'))
-    setfenv(factory, setmetatable({RELOAD_DELAY_SECONDS=1, state=state, api=api, unsafe_resources={unsafe=true},
+    setfenv(factory, setmetatable({RELOAD_DELAY_SECONDS=1, state=state, api=api,
+        unsafe_resources={unsafe=true},
         context_reader=function() return fresh end,
         emit=function(s) logs[#logs+1]=s end, debug_emit=function() end,
         scalar=tostring}, {__index=_G}))
@@ -34,7 +44,7 @@ test('empty timer sends only once', function()
     s.step(1); s.step(7); assert(s.sent()==1)
 end)
 test('AMR requests at one magazine round and still works at zero', function()
-    local s=scenario(); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
+    local s=scenario(true); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
     s.row.magazine_chamber_token=40
     s.row.current_weapon_resource='89c5493e08ca4207'
     s.row.magazine_count=2; assert(not s.empty(s.row))
@@ -45,14 +55,14 @@ test('AMR requests at one magazine round and still works at zero', function()
     s.row.magazine_chamber_token=0; assert(s.empty(s.row))
 end)
 test('R-36 requests at zero magazine rounds without a bolt check', function()
-    local s=scenario(); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
+    local s=scenario(true); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
     s.row.current_weapon_resource='b6aff2195568767f'
     s.row.magazine_chamber_token=40
     s.row.magazine_count=1; assert(not s.empty(s.row))
     s.row.magazine_count=0; assert(s.empty(s.row))
 end)
 test('Sweeper and Evictor thresholds include a chambered round', function()
-    local s=scenario(); s.row.rounds_chambered=true; s.row.rounds_chamber_token=297
+    local s=scenario(true); s.row.rounds_chambered=true; s.row.rounds_chamber_token=297
     s.row.current_weapon_resource='dcd1c835407ef7ba'
     s.row.rounds_magazine_count=4; assert(not s.empty(s.row))
     s.row.rounds_magazine_count=3; assert(s.empty(s.row))
@@ -60,8 +70,77 @@ test('Sweeper and Evictor thresholds include a chambered round', function()
     s.row.rounds_magazine_count=2; assert(not s.empty(s.row))
     s.row.rounds_magazine_count=1; assert(s.empty(s.row))
 end)
+
+test('tactical switch gates existing and new early reload rules', function()
+    local off=scenario(); off.row.ammo_path='weapon_magazine'; off.row.magazine_verified=true
+    off.row.current_weapon_resource='89c5493e08ca4207'; off.row.magazine_count=1
+    off.row.magazine_chamber_token=259
+    assert(not off.empty(off.row))
+    off.row.magazine_count=0; assert(not off.empty(off.row))
+    off.row.magazine_chamber_token=0; assert(off.empty(off.row))
+    local on=scenario(true); on.row.ammo_path='weapon_magazine'; on.row.magazine_verified=true
+    on.row.current_weapon_resource='89c5493e08ca4207'; on.row.magazine_count=1
+    on.row.magazine_chamber_token=259; assert(on.empty(on.row))
+end)
+
+test('configured magazine families use exact player-held resource IDs', function()
+    local s=scenario(true); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
+    s.row.magazine_count=1; s.row.magazine_chamber_token=259
+    for _,id in ipairs({'84354339522c932d','a955c4ea6f6d4203',
+        '4c786785c79d44e7','8a307bd1811a5fe9','dbb6c961c59fadc1',
+        'b43235dbd493750c','1d5943301a29c940'}) do
+        s.row.current_weapon_resource=id; assert(s.empty(s.row),id)
+    end
+    for _,id in ipairs({'80f1a156d9fa1e36', -- JAR-5
+        'a32621e3bde13379', -- AX/AR-23 Guard Dog
+        '54d86057f5dacfb9'}) do -- AC-8 sentry
+        s.row.current_weapon_resource=id; assert(not s.empty(s.row),id)
+    end
+    s.row.current_weapon_resource='05d8d8c073b9d502' -- SG-8P
+    s.row.magazine_count=8; assert(s.empty(s.row))
+    s.row.magazine_count=9; assert(not s.empty(s.row))
+end)
+
+test('new rounds thresholds use magazine count and AC-8 stays single request', function()
+    local s=scenario(true); s.row.rounds_chambered=true; s.row.rounds_chamber_token=259
+    s.row.current_weapon_resource='41eac4a03987faa0' -- SG-8
+    s.row.rounds_magazine_count=8; assert(s.empty(s.row))
+    s.row.rounds_magazine_count=9; assert(not s.empty(s.row))
+    s.row.current_weapon_resource='a8cffb316f0b5c5f' -- AC-8
+    s.row.rounds_magazine_count=1; assert(s.empty(s.row))
+    s.continuous_step(0); assert(s.sent()==0)
+    s.continuous_step(1); assert(s.sent()==1)
+    s.continuous_step(1.2); assert(s.sent()==1)
+end)
+
+test('standing reload requires a fresh attack on real empty', function()
+    local s=scenario(true); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
+    s.row.current_weapon_resource='9f80d67a12a7e40f' -- GR-8
+    s.row.magazine_count=1; s.row.magazine_chamber_token=259
+    s.state.keys.LMB=true; s.step(0); s.step(2); assert(s.sent()==0)
+    s.row.magazine_count=0; s.row.magazine_chamber_token=0
+    s.step(3); s.step(5); assert(s.sent()==0)
+    s.state.lmb_edge_time=5.1; s.step(5.1); assert(s.sent()==1)
+end)
+
+test('LAS-98 requests only on a new attack after verified burned lock', function()
+    local s=scenario(); s.row.ammo_path='weapon_heat'
+    s.row.current_weapon_resource='d54b9505c0f72873'
+    s.row.heat_verified=true; s.row.heat_requires_replacement=true
+    s.row.heat_overheated=true; s.state.keys.LMB=true
+    s.step(0); s.step(2); assert(s.sent()==0)
+    s.state.lmb_edge_time=2.1; s.step(2.1); assert(s.sent()==1)
+end)
+
+test('MG-43 experimental reader uses empty attack only', function()
+    local s=scenario(true); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
+    s.row.current_weapon_resource='11c27d3babb38956'
+    s.row.magazine_count=0; s.row.magazine_chamber_token=0
+    s.step(0); s.step(2); assert(s.sent()==0)
+    s.state.lmb_edge_time=2.1; s.step(2.1); assert(s.sent()==1)
+end)
 test('continuous loading repeats at 0.1 seconds and records each request', function()
-    local s=scenario(); s.row.current_weapon_resource='dcd1c835407ef7ba'
+    local s=scenario(true); s.row.current_weapon_resource='dcd1c835407ef7ba'
     s.row.rounds_chambered=true; s.row.rounds_chamber_token=297
     s.row.rounds_magazine_count=3
     s.continuous_step(0); assert(s.sent()==1)
@@ -71,7 +150,7 @@ test('continuous loading repeats at 0.1 seconds and records each request', funct
     assert(select(2,log:gsub('reason=continuous_load',''))==2)
 end)
 test('manual R and stale context suppress continuous loading', function()
-    local s=scenario(); s.row.current_weapon_resource='006e44327bb953fe'
+    local s=scenario(true); s.row.current_weapon_resource='006e44327bb953fe'
     s.row.rounds_chambered=true; s.row.rounds_chamber_token=297
     s.row.rounds_magazine_count=1; s.state.keys.R=true
     s.continuous_step(0); assert(s.sent()==0)
@@ -81,7 +160,7 @@ test('manual R and stale context suppress continuous loading', function()
     s.fresh(s.row); s.continuous_step(.51); assert(s.sent()==1)
 end)
 test('our injected R does not suppress the next continuous request', function()
-    local s=scenario(); s.row.current_weapon_resource='dcd1c835407ef7ba'
+    local s=scenario(true); s.row.current_weapon_resource='dcd1c835407ef7ba'
     s.row.rounds_chambered=true; s.row.rounds_chamber_token=297
     s.row.rounds_magazine_count=3
     s.continuous_step(0); assert(s.sent()==1)

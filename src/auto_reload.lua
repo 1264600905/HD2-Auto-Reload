@@ -9,24 +9,14 @@ if existing then return existing end
 local DEBUG = false -- DEBUG_BUILD_FLAG
 local RELOAD_DELAY_SECONDS = 1
 local CONTINUOUS_RELOAD_INTERVAL_SECONDS = 0.1
--- These resource IDs and thresholds come from the four-weapon fork package.
--- Magazine count excludes a chambered round. AMR starts at count 1;
--- R-36 follows the fork's count-0 rule without a bolt action check.
-local early_magazine_limits = {
-    ['89c5493e08ca4207'] = 1, -- APW-1 Anti-Materiel Rifle
-    ['b6aff2195568767f'] = 0, -- R-36 Eruptor
-}
-local continuous_rounds_limits = {
-    ['dcd1c835407ef7ba'] = 4, -- SG-97 Sweeper
-    ['006e44327bb953fe'] = 2, -- GL-15 Evictor
-}
-local state = {revision = DEBUG and 'auto-reload-function-test-fork-r36-zero-debug' or 'auto-reload-function-test-fork-r36-zero',
+-- RELOAD_CONFIG_INSERT
+local state = {revision = DEBUG and 'auto-reload-configurable-25327279-debug' or 'auto-reload-configurable-25327279',
     ticks = 0, elapsed = 0, snapshots = 0,
     latest_row = nil,
     lmb_edge_time = nil, empty_since = nil, attempted = false, identity = nil}
--- Reported by the tester as crash-prone while being equipped. Keep it out of
--- all manager/state probing until its native layout is independently verified.
-local unsafe_resources = {['11c27d3babb38956'] = 'user_reported_crash'}
+-- MG-43's earlier crash report remains unresolved. Its guarded Magazine
+-- reader path is enabled experimentally at the user's request.
+local unsafe_resources = {}
 rawset(_G, 'LiuAutoReloadRounds', state)
 
 local logger = rawget(_G, 'CowboyBingusModLoader')
@@ -573,14 +563,12 @@ local function input_probe()
     end
 end
 
-local function rounds_empty(row)
+local function truly_empty(row)
     if not row or row.context_status ~= 'context_observed' or
         row.current_weapon_resource == 'UNKNOWN' then return false end
     if row.ammo_path == 'weapon_magazine' then
-        if row.magazine_verified ~= true or type(row.magazine_count) ~= 'number' then return false end
-        local limit = early_magazine_limits[row.current_weapon_resource]
-        if limit ~= nil then return row.magazine_count <= limit end
-        return row.magazine_count == 0 and row.magazine_chamber_token == 0
+        return row.magazine_verified == true and row.magazine_count == 0 and
+            row.magazine_chamber_token == 0
     end
     if row.ammo_path == 'weapon_heat' then
         return row.heat_verified == true and row.heat_requires_replacement == true and
@@ -588,17 +576,40 @@ local function rounds_empty(row)
     end
     if row.ammo_path ~= 'weapon_rounds' then return false end
     if type(row.rounds_chambered) ~= 'boolean' then return false end
-    local limit = continuous_rounds_limits[row.current_weapon_resource]
-    if limit ~= nil then
-        return type(row.rounds_magazine_count) == 'number' and
-            type(row.rounds_chamber_token) == 'number' and
-            row.rounds_magazine_count + (row.rounds_chamber_token ~= 0 and 1 or 0) <= limit
-    end
+    if type(row.rounds_magazine_count) ~= 'number' then return false end
     if row.rounds_chambered then
         return row.rounds_magazine_count == 0 and
             (row.rounds_chamber_token == 0 or row.rounds_chamber_blocked == true)
     end
     return row.rounds_magazine_count == 0
+end
+
+local function tactical_rule(row)
+    if not ENABLE_TACTICAL_RELOAD or not row then return nil end
+    local rule = tactical_rules[row.current_weapon_resource]
+    if rule and rule.path == row.ammo_path then return rule end
+end
+
+local function rounds_empty(row)
+    if not row or row.context_status ~= 'context_observed' or
+        row.current_weapon_resource == 'UNKNOWN' then return false end
+    if attack_only_resources[row.current_weapon_resource] then return truly_empty(row) end
+    local rule = tactical_rule(row)
+    if rule then
+        if row.ammo_path == 'weapon_magazine' then
+            return row.magazine_verified == true and type(row.magazine_count) == 'number' and
+                row.magazine_count <= rule.limit
+        elseif row.ammo_path == 'weapon_rounds' then
+            if type(row.rounds_chambered) ~= 'boolean' or
+                type(row.rounds_magazine_count) ~= 'number' then return false end
+            if rule.basis == 'total' then
+                return type(row.rounds_chamber_token) == 'number' and
+                    row.rounds_magazine_count + (row.rounds_chamber_token ~= 0 and 1 or 0) <= rule.limit
+            end
+            return row.rounds_magazine_count <= rule.limit
+        end
+    end
+    return truly_empty(row)
 end
 
 local function fresh_context_matches(row, fresh)
@@ -702,7 +713,9 @@ local function auto_reload_step()
             emit('RELOAD_UNCONFIRMED reason=still_empty_after_8_seconds retry=press_attack')
             state.request_at = nil
         end
-        if row.ammo_path == 'weapon_heat' and state.elapsed - state.empty_since < RELOAD_DELAY_SECONDS then
+        local attack_only = attack_only_resources[row.current_weapon_resource] == true
+        if row.ammo_path == 'weapon_heat' and not attack_only and
+            state.elapsed - state.empty_since < RELOAD_DELAY_SECONDS then
             -- Heat always waits a full second, including held fire/attack edges.
             return
         end
@@ -710,10 +723,11 @@ local function auto_reload_step()
             state.lmb_edge_time >= state.empty_since then
             state.lmb_edge_time = nil
             reload_request('empty_attack')
-        elseif not state.attempted and state.keys and state.keys.LMB and
+        elseif not attack_only and not state.attempted and state.keys and state.keys.LMB and
             state.elapsed - state.empty_since >= 0.15 then
             reload_request('empty_attack_held')
-        elseif not state.attempted and state.elapsed - state.empty_since >= RELOAD_DELAY_SECONDS then
+        elseif not attack_only and not state.attempted and
+            state.elapsed - state.empty_since >= RELOAD_DELAY_SECONDS then
             reload_request('empty_1_second')
         end
     else
@@ -742,9 +756,10 @@ end
 
 local function continuous_reload_step()
     local row = state.latest_row
+    local rule = tactical_rule(row)
     if not row or row.context_status ~= 'context_observed' or
         row.ammo_path ~= 'weapon_rounds' or
-        continuous_rounds_limits[row.current_weapon_resource] == nil or
+        not rule or rule.continuous ~= true or
         not rounds_empty(row) or row.weapon_owned ~= true or
         not state.latest_at or state.elapsed - state.latest_at > 0.25 or
         unsafe_resources[row.current_weapon_resource] or not api.game_focused() then
@@ -785,7 +800,9 @@ local function continuous_reload_step()
     if ok then state.attempted = true; state.request_at = state.elapsed end
 end
 
-emit('START revision=' .. state.revision .. ' debug=' .. tostring(DEBUG) .. ' reload_delay=1 heat_overheat_reload=true rounds_and_magazine=true no_native_calls=true no_memory_writes=true input_injection=true')
+emit('START revision=' .. state.revision .. ' debug=' .. tostring(DEBUG) ..
+    ' tactical_reload=' .. tostring(ENABLE_TACTICAL_RELOAD) ..
+    ' reload_delay=1 heat_overheat_reload=true rounds_and_magazine=true no_native_calls=true no_memory_writes=true input_injection=true')
 snapshot('initial')
 
 local original_update = rawget(_G, 'update')

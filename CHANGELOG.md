@@ -1,5 +1,11 @@
 # Changelog
 
+## configurable tactical reload (local test branch)
+
+- Add a build-time “启用战术换弹” switch and per-resource thresholds for the requested player-held weapons. Exclude sentries, Guard Dogs and JAR-5; include SG-8P.
+- Retain SG-97 and GL-15's existing magazine-plus-chamber thresholds and continuous loading behavior.
+- Require a new attack press after verified empty state for the specified stationary reload weapons. Enable MG-43's Magazine reader experimentally at the user's request; its earlier crash report remains unresolved.
+
 ## function-test-fork (local test branch)
 
 - Add early reload for APW-1 AMR at magazine count 1; R-36 Eruptor requests R at magazine count 0 without a bolt action check.
