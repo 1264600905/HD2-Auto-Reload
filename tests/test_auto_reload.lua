@@ -33,18 +33,23 @@ test('empty timer sends only once', function()
     local s=scenario(); s.step(0); s.step(.99); assert(s.sent()==0)
     s.step(1); s.step(7); assert(s.sent()==1)
 end)
-test('AMR and R-36 request at one magazine round and still work at zero', function()
+test('AMR requests at one magazine round and still works at zero', function()
     local s=scenario(); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
     s.row.magazine_chamber_token=40
-    for _,resource in ipairs({'89c5493e08ca4207','b6aff2195568767f'}) do
-        s.row.current_weapon_resource=resource
-        s.row.magazine_count=2; assert(not s.empty(s.row))
-        s.row.magazine_count=1; assert(s.empty(s.row))
-        s.row.magazine_count=0; assert(s.empty(s.row))
-    end
+    s.row.current_weapon_resource='89c5493e08ca4207'
+    s.row.magazine_count=2; assert(not s.empty(s.row))
+    s.row.magazine_count=1; assert(s.empty(s.row))
+    s.row.magazine_count=0; assert(s.empty(s.row))
     s.row.current_weapon_resource='ordinary'
     assert(not s.empty(s.row))
     s.row.magazine_chamber_token=0; assert(s.empty(s.row))
+end)
+test('R-36 requests at zero magazine rounds without a bolt check', function()
+    local s=scenario(); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
+    s.row.current_weapon_resource='b6aff2195568767f'
+    s.row.magazine_chamber_token=40
+    s.row.magazine_count=1; assert(not s.empty(s.row))
+    s.row.magazine_count=0; assert(s.empty(s.row))
 end)
 test('Sweeper and Evictor thresholds include a chambered round', function()
     local s=scenario(); s.row.rounds_chambered=true; s.row.rounds_chamber_token=297

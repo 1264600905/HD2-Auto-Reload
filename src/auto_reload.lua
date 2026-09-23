@@ -10,17 +10,17 @@ local DEBUG = false -- DEBUG_BUILD_FLAG
 local RELOAD_DELAY_SECONDS = 1
 local CONTINUOUS_RELOAD_INTERVAL_SECONDS = 0.1
 -- These resource IDs and thresholds come from the four-weapon fork package.
--- Magazine count excludes a chambered round. The R-36 and AMR both start
--- their special reload policy at magazine count 1.
+-- Magazine count excludes a chambered round. AMR starts at count 1;
+-- R-36 follows the fork's count-0 rule without a bolt action check.
 local early_magazine_limits = {
     ['89c5493e08ca4207'] = 1, -- APW-1 Anti-Materiel Rifle
-    ['b6aff2195568767f'] = 1, -- R-36 Eruptor
+    ['b6aff2195568767f'] = 0, -- R-36 Eruptor
 }
 local continuous_rounds_limits = {
     ['dcd1c835407ef7ba'] = 4, -- SG-97 Sweeper
     ['006e44327bb953fe'] = 2, -- GL-15 Evictor
 }
-local state = {revision = DEBUG and 'auto-reload-function-test-fork-debug' or 'auto-reload-function-test-fork',
+local state = {revision = DEBUG and 'auto-reload-function-test-fork-r36-zero-debug' or 'auto-reload-function-test-fork-r36-zero',
     ticks = 0, elapsed = 0, snapshots = 0,
     latest_row = nil,
     lmb_edge_time = nil, empty_since = nil, attempted = false, identity = nil}

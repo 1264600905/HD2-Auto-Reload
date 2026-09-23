@@ -2,7 +2,7 @@
 
 ## function-test-fork (local test branch)
 
-- Add early reload policies for APW-1 AMR and R-36 Eruptor at magazine count 1.
+- Add early reload for APW-1 AMR at magazine count 1; R-36 Eruptor requests R at magazine count 0 without a bolt action check.
 - Add continuous R requests at low ammo for SG-97 Sweeper (four total rounds) and GL-15 Evictor (two total rounds), with fresh context checks, manual R suppression, and request logging.
 - Keep the one-time `GetAsyncKeyState` FFI declaration from v0.5.1.
 
