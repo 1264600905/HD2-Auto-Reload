@@ -48,13 +48,13 @@ python scripts/build.py --game-dir '你的 Steam 游戏目录/Helldivers 2'
 ```
 
 当前本地默认产物为 `build/Auto-Reload-configurable.zip`；加 `--enable-tactical-reload` 会生成 `build/Auto-Reload-configurable-tactical.zip`。二者沿用同一 GUID，只能部署其中一份。正式发布版仍从上面的 v0.5.1 Release 下载。`build/` 不纳入源码提交。
-“启用战术换弹”是构建前的开关：可以使用上述参数，或在 [静态换弹配置](src/reload_config.lua) 中将 `ENABLE_TACTICAL_RELOAD` 设为 `true`；默认关闭。配置改动后须重新构建、部署并重启游戏，游玩时不能修改。每条规则按武器资源 ID 指定弹匣阈值、组件类型及是否逐发续装；可为其他已验证的武器新增规则。SG-97（总弹 ≤4）和 GL-15（总弹 ≤2）的现有计数口径不变。普通测试包的日志版本为 `auto-reload-configurable-25327279`，`START` 行还会记录开关状态。
+“启用战术换弹”是构建前的开关：可以使用上述参数，或在 [静态换弹配置](src/reload_config.lua) 中将 `ENABLE_TACTICAL_RELOAD` 设为 `true`；默认关闭。配置改动后须重新构建、部署并重启游戏，游玩时不能修改。每条规则按武器资源 ID 指定弹匣阈值、组件类型及是否逐发续装；可为其他已验证的武器新增规则。SG-97（总弹 ≤4）和 GL-15（总弹 ≤2）的现有计数口径不变。弹药数量大于 1 时，达到战术阈值后按最近一次射击点击等待 0.1 秒；0.5 秒内继续点击会将等待提高到 0.2、0.4、0.6 秒，每次从最新点击重新计时。弹药为 1 或 0 时沿用原触发逻辑。普通测试包的日志版本为 `auto-reload-configurable-click-delay-25327279`，`START` 行还会记录开关状态。
 组件 map 以十六进制文本保存在 `data/`，构建时嵌入 Lua；运行时验证完整指纹、资源记录和实体身份。
 游戏内还会验证 DLL PE 标识，以及玩家、实体、物品栏、Rounds、Magazine 和 Heat 的已核对指令片段。v5 使用新版 Magazine/Rounds/Heat 全表指纹和定点槽位。
 
 排查空仓附近闪退时可构建 `python scripts/build.py --debug`，产物为
 `build/Auto-Reload-configurable-debug.zip`。调试包沿用同一 GUID，应替换普通版并重启游戏。
-日志的 `START` 行会显示 `revision=auto-reload-configurable-25327279-debug debug=true`；
+日志的 `START` 行会显示 `revision=auto-reload-configurable-click-delay-25327279-debug debug=true`；
 `DEBUG_SNAPSHOT_*`、`DEBUG_AUTO_STEP_*`、`DEBUG_RELOAD_*` 和 `DEBUG_SENDINPUT_*`
 会在接近空仓及请求换弹时记录调用边界。
 日志仍位于 `%LOCALAPPDATA%/CowboyBingus/Helldivers2/Logs/AutoReloadRounds.log`。

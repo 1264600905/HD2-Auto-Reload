@@ -9,8 +9,10 @@ if existing then return existing end
 local DEBUG = false -- DEBUG_BUILD_FLAG
 local RELOAD_DELAY_SECONDS = 1
 local CONTINUOUS_RELOAD_INTERVAL_SECONDS = 0.1
+local TACTICAL_RAPID_CLICK_WINDOW_SECONDS = 0.5
+local TACTICAL_CLICK_DELAYS = {0.1, 0.2, 0.4, 0.6}
 -- RELOAD_CONFIG_INSERT
-local state = {revision = DEBUG and 'auto-reload-configurable-25327279-debug' or 'auto-reload-configurable-25327279',
+local state = {revision = DEBUG and 'auto-reload-configurable-click-delay-25327279-debug' or 'auto-reload-configurable-click-delay-25327279',
     ticks = 0, elapsed = 0, snapshots = 0,
     latest_row = nil,
     lmb_edge_time = nil, empty_since = nil, attempted = false, identity = nil}
@@ -551,7 +553,10 @@ local function input_probe()
         if state.keys == nil then state.keys = {} end
         if state.keys[name] ~= down then
             state.keys[name] = down
-            if name == 'LMB' and down then state.lmb_edge_time = state.elapsed end
+            if name == 'LMB' and down then
+                state.lmb_edge_time = state.elapsed
+                state.last_lmb_press_at = state.elapsed
+            end
             emit(string.format('INPUT tick=%d elapsed=%.3f name=%s down=%s raw=%d',
                 state.ticks, state.elapsed, name, tostring(down), value))
             if name == 'F8' and down then
@@ -590,26 +595,67 @@ local function tactical_rule(row)
     if rule and rule.path == row.ammo_path then return rule end
 end
 
+local function tactical_ammo_count(row, rule)
+    if not rule then return nil end
+    if row.ammo_path == 'weapon_magazine' then
+        if row.magazine_verified == true and type(row.magazine_count) == 'number' then
+            return row.magazine_count
+        end
+    elseif row.ammo_path == 'weapon_rounds' and
+        type(row.rounds_chambered) == 'boolean' and
+        type(row.rounds_magazine_count) == 'number' then
+        if rule.basis == 'total' then
+            if type(row.rounds_chamber_token) == 'number' then
+                return row.rounds_magazine_count + (row.rounds_chamber_token ~= 0 and 1 or 0)
+            end
+        else
+            return row.rounds_magazine_count
+        end
+    end
+end
+
 local function rounds_empty(row)
     if not row or row.context_status ~= 'context_observed' or
         row.current_weapon_resource == 'UNKNOWN' then return false end
     if attack_only_resources[row.current_weapon_resource] then return truly_empty(row) end
     local rule = tactical_rule(row)
     if rule then
-        if row.ammo_path == 'weapon_magazine' then
-            return row.magazine_verified == true and type(row.magazine_count) == 'number' and
-                row.magazine_count <= rule.limit
-        elseif row.ammo_path == 'weapon_rounds' then
-            if type(row.rounds_chambered) ~= 'boolean' or
-                type(row.rounds_magazine_count) ~= 'number' then return false end
-            if rule.basis == 'total' then
-                return type(row.rounds_chamber_token) == 'number' and
-                    row.rounds_magazine_count + (row.rounds_chamber_token ~= 0 and 1 or 0) <= rule.limit
-            end
-            return row.rounds_magazine_count <= rule.limit
-        end
+        local count = tactical_ammo_count(row, rule)
+        if count ~= nil then return count <= rule.limit end
     end
     return truly_empty(row)
+end
+
+local function reset_tactical_clicks()
+    state.tactical_last_click_at = nil
+    state.tactical_seen_click_at = nil
+    state.tactical_click_tier = nil
+    state.tactical_click_generation = nil
+    state.tactical_sent_generation = nil
+end
+
+local function track_tactical_click()
+    local click = state.last_lmb_press_at
+    if not click or click == state.tactical_seen_click_at or
+        state.elapsed - click > 0.25 then return end
+    local previous = state.tactical_last_click_at
+    if previous and click >= previous and
+        click - previous <= TACTICAL_RAPID_CLICK_WINDOW_SECONDS then
+        state.tactical_click_tier = math.min((state.tactical_click_tier or 1) + 1,
+            #TACTICAL_CLICK_DELAYS)
+    else
+        state.tactical_click_tier = 1
+    end
+    state.tactical_seen_click_at = click
+    state.tactical_last_click_at = click
+    state.tactical_click_generation = (state.tactical_click_generation or 0) + 1
+end
+
+local function tactical_click_wait_finished()
+    local last_click = state.tactical_last_click_at
+    local since = last_click or state.empty_since
+    local delay = TACTICAL_CLICK_DELAYS[state.tactical_click_tier or 1]
+    return since and state.elapsed - since >= delay
 end
 
 local function fresh_context_matches(row, fresh)
@@ -626,11 +672,13 @@ local function reload_request(reason)
     debug_emit(string.format('DEBUG_RELOAD_ENTER tick=%d elapsed=%.3f reason=%s resource=%s',
         state.ticks, state.elapsed, reason,
         tostring(state.latest_row and state.latest_row.current_weapon_resource)))
-    if state.attempted and reason ~= 'empty_attack' then
+    if state.attempted and reason ~= 'empty_attack' and reason ~= 'tactical_idle' then
         debug_emit('DEBUG_RELOAD_SKIP reason=already_attempted')
         return
     end
-    if state.last_request and state.elapsed - state.last_request < 2 then
+    local minimum_interval = reason == 'tactical_idle' and
+        CONTINUOUS_RELOAD_INTERVAL_SECONDS or 2
+    if state.last_request and state.elapsed - state.last_request < minimum_interval then
         debug_emit('DEBUG_RELOAD_SKIP reason=rate_limited')
         return
     end
@@ -666,6 +714,7 @@ local function reload_request(reason)
         tostring(state.latest_row.magazine_count or state.latest_row.rounds_magazine_count),
         tostring(state.latest_row.magazine_chamber_token or state.latest_row.rounds_chamber_token)))
     if ok then state.attempted = true; state.request_at = state.elapsed end
+    return ok
 end
 
 local function auto_reload_step()
@@ -678,6 +727,7 @@ local function auto_reload_step()
         state.identity, state.empty_since, state.attempted = nil, nil, false
         state.lmb_edge_time, state.request_at = nil, nil
         state.manual_reload_episode = nil
+        reset_tactical_clicks()
         return
     end
     local identity = tostring(row.current_weapon_resource) .. ':' .. tostring(row.selected_entity_id) ..
@@ -686,9 +736,11 @@ local function auto_reload_step()
         state.identity, state.empty_since, state.attempted = identity, nil, false
         state.request_at = nil
         state.manual_reload_episode = nil
+        reset_tactical_clicks()
         emit('WEAPON_CONTEXT resource=' .. tostring(row.current_weapon_resource) ..
             ' entity=' .. tostring(row.selected_entity_id) .. ' policy=' .. row.ammo_path)
     end
+    if ENABLE_TACTICAL_RELOAD then track_tactical_click() end
     if rounds_empty(row) then
         local own_reload_visible = (api.own_reload_active and api.own_reload_active()) or
             (state.last_request and state.elapsed - state.last_request < 0.15)
@@ -714,6 +766,20 @@ local function auto_reload_step()
             state.request_at = nil
         end
         local attack_only = attack_only_resources[row.current_weapon_resource] == true
+        local rule = tactical_rule(row)
+        local count = tactical_ammo_count(row, rule)
+        if not attack_only and count and count > 1 and count <= rule.limit then
+            -- A new shot restarts the wait. Magazine weapons request once per
+            -- click interval; per-round weapons continue in continuous_reload_step.
+            if not state.manual_reload_episode and tactical_click_wait_finished() and
+                not rule.continuous and
+                state.tactical_sent_generation ~= (state.tactical_click_generation or 0) then
+                if reload_request('tactical_idle') then
+                    state.tactical_sent_generation = state.tactical_click_generation or 0
+                end
+            end
+            return
+        end
         if row.ammo_path == 'weapon_heat' and not attack_only and
             state.elapsed - state.empty_since < RELOAD_DELAY_SECONDS then
             -- Heat always waits a full second, including held fire/attack edges.
@@ -748,6 +814,7 @@ local function auto_reload_step()
         end
         state.empty_since, state.attempted = nil, false
         state.manual_reload_episode = nil
+        state.tactical_sent_generation = nil
         if state.lmb_edge_time and state.elapsed - state.lmb_edge_time > 0.75 then
             state.lmb_edge_time = nil
         end
@@ -757,6 +824,7 @@ end
 local function continuous_reload_step()
     local row = state.latest_row
     local rule = tactical_rule(row)
+    local count = tactical_ammo_count(row, rule)
     if not row or row.context_status ~= 'context_observed' or
         row.ammo_path ~= 'weapon_rounds' or
         not rule or rule.continuous ~= true or
@@ -767,6 +835,7 @@ local function continuous_reload_step()
         state.continuous_probe_at = nil
         return
     end
+    if count and count > 1 and not tactical_click_wait_finished() then return end
     local identity = tostring(row.current_weapon_resource) .. ':' .. tostring(row.selected_entity_id) ..
         ':' .. tostring(row.selected_slot) .. ':' .. tostring(row._weapon_bytes) .. ':' .. tostring(row.local_entity_id)
     if identity ~= state.continuous_identity then

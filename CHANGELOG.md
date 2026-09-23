@@ -1,5 +1,10 @@
 # Changelog
 
+## tactical click delay (local test branch)
+
+- When tactical ammo is above one, wait 0.1 seconds after the latest attack click before R; rapid clicks within 0.5 seconds raise that wait to 0.2, 0.4 and at most 0.6 seconds.
+- Keep the previous reload timing at one or zero rounds, and preserve SG-97 and GL-15's total-ammo thresholds.
+
 ## configurable tactical reload (local test branch)
 
 - Add a build-time “启用战术换弹” switch and per-resource thresholds for the requested player-held weapons. Exclude sentries, Guard Dogs and JAR-5; include SG-8P.

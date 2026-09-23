@@ -33,6 +33,7 @@ local function scenario(tactical_enabled)
     return {row=row, state=state, logs=logs, empty=empty, sent=function() return sent end,
         fresh=function(value) fresh=value end, focus=function(value) focused=value end,
         own_key=function(value) own_down=value end,
+        click=function(t) state.last_lmb_press_at=t; state.lmb_edge_time=t end,
         step=function(t) state.elapsed=t; state.latest_at=t; step() end,
         continuous_step=function(t) state.elapsed=t; state.latest_at=t; step(); continuous() end}
 end
@@ -143,9 +144,11 @@ test('continuous loading repeats at 0.1 seconds and records each request', funct
     local s=scenario(true); s.row.current_weapon_resource='dcd1c835407ef7ba'
     s.row.rounds_chambered=true; s.row.rounds_chamber_token=297
     s.row.rounds_magazine_count=3
-    s.continuous_step(0); assert(s.sent()==1)
-    s.continuous_step(.05); assert(s.sent()==1)
-    s.continuous_step(.11); assert(s.sent()==2)
+    s.continuous_step(0); assert(s.sent()==0)
+    s.continuous_step(.099); assert(s.sent()==0)
+    s.continuous_step(.101); assert(s.sent()==1)
+    s.continuous_step(.15); assert(s.sent()==1)
+    s.continuous_step(.21); assert(s.sent()==2)
     local log=table.concat(s.logs,'\n')
     assert(select(2,log:gsub('reason=continuous_load',''))==2)
 end)
@@ -163,11 +166,60 @@ test('our injected R does not suppress the next continuous request', function()
     local s=scenario(true); s.row.current_weapon_resource='dcd1c835407ef7ba'
     s.row.rounds_chambered=true; s.row.rounds_chamber_token=297
     s.row.rounds_magazine_count=3
-    s.continuous_step(0); assert(s.sent()==1)
-    s.state.keys.R=true; s.own_key(true); s.continuous_step(.05)
+    s.continuous_step(0); s.continuous_step(.101); assert(s.sent()==1)
+    s.state.keys.R=true; s.own_key(true); s.continuous_step(.15)
     assert(s.sent()==1 and not s.state.manual_reload_episode)
-    s.state.keys.R=false; s.own_key(false); s.continuous_step(.11)
+    s.state.keys.R=false; s.own_key(false); s.continuous_step(.21)
     assert(s.sent()==2)
+end)
+
+test('rapid clicks lengthen tactical wait from last click to 0.6 seconds', function()
+    local s=scenario(true); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
+    s.row.current_weapon_resource='05d8d8c073b9d502' -- SG-8P, limit 8
+    s.row.magazine_count=8; s.row.magazine_chamber_token=259
+    s.click(0); s.step(0); s.step(.099); assert(s.sent()==0)
+    s.step(.101); assert(s.sent()==1)
+    s.click(.3); s.step(.3); s.step(.499); assert(s.sent()==1)
+    s.step(.501); assert(s.sent()==2)
+    s.click(.7); s.step(.7); s.step(1.099); assert(s.sent()==2)
+    s.step(1.101); assert(s.sent()==3)
+    s.click(1.2); s.step(1.2); s.step(1.799); assert(s.sent()==3)
+    s.step(1.801); assert(s.sent()==4)
+end)
+
+test('rapid click cap and gap reset use the latest click', function()
+    local s=scenario(true); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
+    s.row.current_weapon_resource='05d8d8c073b9d502'
+    s.row.magazine_count=8; s.row.magazine_chamber_token=259
+    for _,t in ipairs({0,.2,.4,.6,.8}) do s.click(t); s.step(t) end
+    s.step(1.399); assert(s.sent()==0)
+    s.step(1.401); assert(s.sent()==1) -- cap remains 0.6 after fifth click
+    s.click(2); s.step(2); s.step(2.099); assert(s.sent()==1)
+    s.step(2.101); assert(s.sent()==2) -- gap > 0.5 resets to 0.1
+end)
+
+test('continuous loading also waits after each rapid attack click', function()
+    local s=scenario(true); s.row.current_weapon_resource='dcd1c835407ef7ba'
+    s.row.rounds_chambered=true; s.row.rounds_chamber_token=259
+    s.row.rounds_magazine_count=3 -- SG-97 total is four, above one
+    s.click(0); s.continuous_step(0)
+    s.click(.05); s.continuous_step(.05); s.continuous_step(.249)
+    assert(s.sent()==0)
+    s.continuous_step(.251); assert(s.sent()==1)
+    s.click(.3); s.continuous_step(.3); s.continuous_step(.699)
+    assert(s.sent()==1)
+    s.continuous_step(.701); assert(s.sent()==2)
+end)
+
+test('one round keeps the existing immediate tactical path', function()
+    local s=scenario(true); s.row.current_weapon_resource='dcd1c835407ef7ba'
+    s.row.rounds_chambered=true; s.row.rounds_chamber_token=259
+    s.row.rounds_magazine_count=0 -- total ammo is one
+    s.click(0); s.continuous_step(0); assert(s.sent()==1)
+    local m=scenario(true); m.row.ammo_path='weapon_magazine'; m.row.magazine_verified=true
+    m.row.current_weapon_resource='05d8d8c073b9d502'; m.row.magazine_count=1
+    m.row.magazine_chamber_token=259
+    m.click(0); m.step(0); assert(m.sent()==1)
 end)
 test('held fire triggers after empty observation', function()
     local s=scenario(); s.state.keys.LMB=true; s.step(0); s.step(.16); assert(s.sent()==1)
