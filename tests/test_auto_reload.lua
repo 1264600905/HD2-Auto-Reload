@@ -2,23 +2,29 @@
 local file = assert(io.open('src/auto_reload.lua', 'rb'))
 local source = file:read('*a'); file:close()
 local controller = assert(source:match('(local function rounds_empty.-)\nemit%(%\'START'))
+local policies = assert(source:match('(local CONTINUOUS_RELOAD_INTERVAL_SECONDS =.-)\nlocal state ='))
 local tests = 0
 local function scenario()
     local row = {context_status='context_observed', ammo_path='weapon_rounds',
         current_weapon_resource='safe', selected_entity_id=1, weapon_owned=true,
         rounds_magazine_count=0, rounds_chambered=false}
     local state = {elapsed=0, ticks=0, latest_row=row, latest_at=0, keys={}}
-    local sent, logs, fresh, focused = 0, {}, row, true
+    local sent, logs, fresh, focused, own_down = 0, {}, row, true, false
     local api = {game_focused=function() return focused end,
+        own_reload_active=function() return own_down end,
         send_reload=function() sent=sent+1; return true,'test' end}
-    local factory = assert(loadstring(controller .. '\nreturn auto_reload_step, rounds_empty'))
+    local factory = assert(loadstring(policies .. '\n' .. controller ..
+        '\nreturn auto_reload_step, rounds_empty, continuous_reload_step'))
     setfenv(factory, setmetatable({RELOAD_DELAY_SECONDS=1, state=state, api=api, unsafe_resources={unsafe=true},
         context_reader=function() return fresh end,
-        emit=function(s) logs[#logs+1]=s end}, {__index=_G}))
-    local step, empty = factory()
+        emit=function(s) logs[#logs+1]=s end, debug_emit=function() end,
+        scalar=tostring}, {__index=_G}))
+    local step, empty, continuous = factory()
     return {row=row, state=state, logs=logs, empty=empty, sent=function() return sent end,
         fresh=function(value) fresh=value end, focus=function(value) focused=value end,
-        step=function(t) state.elapsed=t; state.latest_at=t; step() end}
+        own_key=function(value) own_down=value end,
+        step=function(t) state.elapsed=t; state.latest_at=t; step() end,
+        continuous_step=function(t) state.elapsed=t; state.latest_at=t; step(); continuous() end}
 end
 local function test(name, fn)
     fn(); tests=tests+1; print('PASS ' .. name)
@@ -26,6 +32,58 @@ end
 test('empty timer sends only once', function()
     local s=scenario(); s.step(0); s.step(.99); assert(s.sent()==0)
     s.step(1); s.step(7); assert(s.sent()==1)
+end)
+test('AMR and R-36 request at one magazine round and still work at zero', function()
+    local s=scenario(); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
+    s.row.magazine_chamber_token=40
+    for _,resource in ipairs({'89c5493e08ca4207','b6aff2195568767f'}) do
+        s.row.current_weapon_resource=resource
+        s.row.magazine_count=2; assert(not s.empty(s.row))
+        s.row.magazine_count=1; assert(s.empty(s.row))
+        s.row.magazine_count=0; assert(s.empty(s.row))
+    end
+    s.row.current_weapon_resource='ordinary'
+    assert(not s.empty(s.row))
+    s.row.magazine_chamber_token=0; assert(s.empty(s.row))
+end)
+test('Sweeper and Evictor thresholds include a chambered round', function()
+    local s=scenario(); s.row.rounds_chambered=true; s.row.rounds_chamber_token=297
+    s.row.current_weapon_resource='dcd1c835407ef7ba'
+    s.row.rounds_magazine_count=4; assert(not s.empty(s.row))
+    s.row.rounds_magazine_count=3; assert(s.empty(s.row))
+    s.row.current_weapon_resource='006e44327bb953fe'
+    s.row.rounds_magazine_count=2; assert(not s.empty(s.row))
+    s.row.rounds_magazine_count=1; assert(s.empty(s.row))
+end)
+test('continuous loading repeats at 0.1 seconds and records each request', function()
+    local s=scenario(); s.row.current_weapon_resource='dcd1c835407ef7ba'
+    s.row.rounds_chambered=true; s.row.rounds_chamber_token=297
+    s.row.rounds_magazine_count=3
+    s.continuous_step(0); assert(s.sent()==1)
+    s.continuous_step(.05); assert(s.sent()==1)
+    s.continuous_step(.11); assert(s.sent()==2)
+    local log=table.concat(s.logs,'\n')
+    assert(select(2,log:gsub('reason=continuous_load',''))==2)
+end)
+test('manual R and stale context suppress continuous loading', function()
+    local s=scenario(); s.row.current_weapon_resource='006e44327bb953fe'
+    s.row.rounds_chambered=true; s.row.rounds_chamber_token=297
+    s.row.rounds_magazine_count=1; s.state.keys.R=true
+    s.continuous_step(0); assert(s.sent()==0)
+    s.state.keys.R=false; s.continuous_step(.2); assert(s.sent()==0)
+    s.row.rounds_magazine_count=3; s.continuous_step(.3)
+    s.row.rounds_magazine_count=1; s.fresh({}); s.continuous_step(.4); assert(s.sent()==0)
+    s.fresh(s.row); s.continuous_step(.51); assert(s.sent()==1)
+end)
+test('our injected R does not suppress the next continuous request', function()
+    local s=scenario(); s.row.current_weapon_resource='dcd1c835407ef7ba'
+    s.row.rounds_chambered=true; s.row.rounds_chamber_token=297
+    s.row.rounds_magazine_count=3
+    s.continuous_step(0); assert(s.sent()==1)
+    s.state.keys.R=true; s.own_key(true); s.continuous_step(.05)
+    assert(s.sent()==1 and not s.state.manual_reload_episode)
+    s.state.keys.R=false; s.own_key(false); s.continuous_step(.11)
+    assert(s.sent()==2)
 end)
 test('held fire triggers after empty observation', function()
     local s=scenario(); s.state.keys.LMB=true; s.step(0); s.step(.16); assert(s.sent()==1)
@@ -219,6 +277,7 @@ test('scan-code press spans frames and failed keyup is retried', function()
     local user = {
         GetForegroundWindow=function() return ffi.cast('void *', 1) end,
         GetWindowThreadProcessId=function(_, owner) owner[0]=focused and 123 or 999 end,
+        GetAsyncKeyState=function() return 0 end,
         SendInput=function(count, input, size)
             assert(count==1 and size==40)
             local kind=tonumber(ffi.cast('uint32_t *',input)[0])
@@ -236,13 +295,15 @@ test('scan-code press spans frames and failed keyup is retried', function()
     local shim=setmetatable({load=function(name) return name=='user32' and user or kernel end}, {__index=ffi})
     local chunk=assert(source:match('(local function read_api%(%).-)%\nlocal function context_reader'))
     local factory=assert(loadstring(chunk .. '\nreturn read_api()'))
-    setfenv(factory,setmetatable({require=function() return shim end},{__index=_G}))
+    setfenv(factory,setmetatable({require=function() return shim end,
+        debug_emit=function() end, state={ticks=0,elapsed=0}},{__index=_G}))
     local api=factory()
-    assert(api.send_reload()); assert(#events==1 and events[1]==8)
+    assert(api.key_state(1)==0 and not api.own_reload_active())
+    assert(api.send_reload()); assert(#events==1 and events[1]==8 and api.own_reload_active())
     now=1070; assert(api.release_reload()); assert(#events==1)
     now=1081; fail_up=true; assert(not api.release_reload()); assert(events[2]==10)
     assert(not api.send_reload())
-    fail_up=false; assert(api.release_reload()); assert(events[3]==10)
+    fail_up=false; assert(api.release_reload()); assert(events[3]==10 and not api.own_reload_active())
     focused=false; assert(not api.send_reload()); assert(#events==3)
     focused=true; assert(api.send_reload()); focused=false
     assert(api.release_reload(true)); assert(events[5]==10)

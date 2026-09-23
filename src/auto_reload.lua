@@ -8,7 +8,19 @@ if existing then return existing end
 
 local DEBUG = false -- DEBUG_BUILD_FLAG
 local RELOAD_DELAY_SECONDS = 1
-local state = {revision = DEBUG and 'auto-reload-0.5.1-debug' or 'auto-reload-0.5.1',
+local CONTINUOUS_RELOAD_INTERVAL_SECONDS = 0.1
+-- These resource IDs and thresholds come from the four-weapon fork package.
+-- Magazine count excludes a chambered round. The R-36 and AMR both start
+-- their special reload policy at magazine count 1.
+local early_magazine_limits = {
+    ['89c5493e08ca4207'] = 1, -- APW-1 Anti-Materiel Rifle
+    ['b6aff2195568767f'] = 1, -- R-36 Eruptor
+}
+local continuous_rounds_limits = {
+    ['dcd1c835407ef7ba'] = 4, -- SG-97 Sweeper
+    ['006e44327bb953fe'] = 2, -- GL-15 Evictor
+}
+local state = {revision = DEBUG and 'auto-reload-function-test-fork-debug' or 'auto-reload-function-test-fork',
     ticks = 0, elapsed = 0, snapshots = 0,
     latest_row = nil,
     lmb_edge_time = nil, empty_since = nil, attempted = false, identity = nil}
@@ -117,6 +129,7 @@ local function read_api()
     end
     function api.key_state(code) return tonumber(get_async_key_state(code)) end
     local release_at
+    function api.own_reload_active() return release_at ~= nil end
     local function key_event(up)
         local input = ffi.new('uint8_t[40]')
         ffi.cast('uint32_t *', input)[0] = 1
@@ -564,8 +577,10 @@ local function rounds_empty(row)
     if not row or row.context_status ~= 'context_observed' or
         row.current_weapon_resource == 'UNKNOWN' then return false end
     if row.ammo_path == 'weapon_magazine' then
-        return row.magazine_verified == true and row.magazine_count == 0 and
-            row.magazine_chamber_token == 0
+        if row.magazine_verified ~= true or type(row.magazine_count) ~= 'number' then return false end
+        local limit = early_magazine_limits[row.current_weapon_resource]
+        if limit ~= nil then return row.magazine_count <= limit end
+        return row.magazine_count == 0 and row.magazine_chamber_token == 0
     end
     if row.ammo_path == 'weapon_heat' then
         return row.heat_verified == true and row.heat_requires_replacement == true and
@@ -573,11 +588,27 @@ local function rounds_empty(row)
     end
     if row.ammo_path ~= 'weapon_rounds' then return false end
     if type(row.rounds_chambered) ~= 'boolean' then return false end
+    local limit = continuous_rounds_limits[row.current_weapon_resource]
+    if limit ~= nil then
+        return type(row.rounds_magazine_count) == 'number' and
+            type(row.rounds_chamber_token) == 'number' and
+            row.rounds_magazine_count + (row.rounds_chamber_token ~= 0 and 1 or 0) <= limit
+    end
     if row.rounds_chambered then
         return row.rounds_magazine_count == 0 and
             (row.rounds_chamber_token == 0 or row.rounds_chamber_blocked == true)
     end
     return row.rounds_magazine_count == 0
+end
+
+local function fresh_context_matches(row, fresh)
+    return rounds_empty(fresh) and fresh.weapon_owned == true and
+        fresh.selected_entity_id == row.selected_entity_id and
+        fresh.selected_slot == row.selected_slot and
+        fresh.ammo_path == row.ammo_path and
+        fresh._weapon_bytes == row._weapon_bytes and
+        fresh.local_entity_id == row.local_entity_id and
+        fresh.current_weapon_resource == row.current_weapon_resource
 end
 
 local function reload_request(reason)
@@ -607,13 +638,7 @@ local function reload_request(reason)
     debug_emit(string.format('DEBUG_RELOAD_REFRESH_END tick=%d elapsed=%.3f ok=%s status=%s',
         state.ticks, state.elapsed, tostring(ok_read),
         scalar(type(fresh) == 'table' and fresh.context_status or fresh)))
-    if not ok_read or not rounds_empty(fresh) or fresh.weapon_owned ~= true or
-        fresh.selected_entity_id ~= state.latest_row.selected_entity_id or
-        fresh.selected_slot ~= state.latest_row.selected_slot or
-        fresh.ammo_path ~= state.latest_row.ammo_path or
-        fresh._weapon_bytes ~= state.latest_row._weapon_bytes or
-        fresh.local_entity_id ~= state.latest_row.local_entity_id or
-        fresh.current_weapon_resource ~= state.latest_row.current_weapon_resource then
+    if not ok_read or not fresh_context_matches(state.latest_row, fresh) then
         debug_emit('DEBUG_RELOAD_SKIP reason=fresh_context_rejected')
         return
     end
@@ -641,6 +666,7 @@ local function auto_reload_step()
         unsafe_resources[row.current_weapon_resource] or not api.game_focused() then
         state.identity, state.empty_since, state.attempted = nil, nil, false
         state.lmb_edge_time, state.request_at = nil, nil
+        state.manual_reload_episode = nil
         return
     end
     local identity = tostring(row.current_weapon_resource) .. ':' .. tostring(row.selected_entity_id) ..
@@ -648,16 +674,20 @@ local function auto_reload_step()
     if identity ~= state.identity then
         state.identity, state.empty_since, state.attempted = identity, nil, false
         state.request_at = nil
+        state.manual_reload_episode = nil
         emit('WEAPON_CONTEXT resource=' .. tostring(row.current_weapon_resource) ..
             ' entity=' .. tostring(row.selected_entity_id) .. ' policy=' .. row.ammo_path)
     end
     if rounds_empty(row) then
-        if state.keys and state.keys.R then
+        local own_reload_visible = (api.own_reload_active and api.own_reload_active()) or
+            (state.last_request and state.elapsed - state.last_request < 0.15)
+        if state.keys and state.keys.R and not own_reload_visible then
             -- The user has already requested replacement for this episode.
             -- Do not duplicate their request as soon as they release the key.
             state.empty_since = state.elapsed
             state.attempted = true
             state.last_request = state.elapsed
+            state.manual_reload_episode = true
             state.lmb_edge_time, state.request_at = nil, nil
             return
         end
@@ -703,10 +733,56 @@ local function auto_reload_step()
                 ' chamber=' .. tostring(row.magazine_chamber_token or row.rounds_chamber_token))
         end
         state.empty_since, state.attempted = nil, false
+        state.manual_reload_episode = nil
         if state.lmb_edge_time and state.elapsed - state.lmb_edge_time > 0.75 then
             state.lmb_edge_time = nil
         end
     end
+end
+
+local function continuous_reload_step()
+    local row = state.latest_row
+    if not row or row.context_status ~= 'context_observed' or
+        row.ammo_path ~= 'weapon_rounds' or
+        continuous_rounds_limits[row.current_weapon_resource] == nil or
+        not rounds_empty(row) or row.weapon_owned ~= true or
+        not state.latest_at or state.elapsed - state.latest_at > 0.25 or
+        unsafe_resources[row.current_weapon_resource] or not api.game_focused() then
+        state.continuous_identity = nil
+        state.continuous_probe_at = nil
+        return
+    end
+    local identity = tostring(row.current_weapon_resource) .. ':' .. tostring(row.selected_entity_id) ..
+        ':' .. tostring(row.selected_slot) .. ':' .. tostring(row._weapon_bytes) .. ':' .. tostring(row.local_entity_id)
+    if identity ~= state.continuous_identity then
+        state.continuous_identity = identity
+        state.continuous_probe_at = nil
+    end
+    if state.manual_reload_episode or
+        (state.last_request and state.elapsed - state.last_request < CONTINUOUS_RELOAD_INTERVAL_SECONDS) or
+        (state.continuous_probe_at and state.elapsed - state.continuous_probe_at < CONTINUOUS_RELOAD_INTERVAL_SECONDS) then
+        return
+    end
+    state.continuous_probe_at = state.elapsed
+    debug_emit(string.format('DEBUG_CONTINUOUS_REFRESH_BEGIN tick=%d elapsed=%.3f',
+        state.ticks, state.elapsed))
+    local ok_read, fresh = pcall(context_reader, api, game)
+    if not ok_read or not fresh_context_matches(row, fresh) then
+        debug_emit('DEBUG_CONTINUOUS_SKIP reason=fresh_context_rejected')
+        return
+    end
+    state.last_request = state.elapsed
+    debug_emit(string.format('DEBUG_CONTINUOUS_SEND_BEGIN tick=%d elapsed=%.3f',
+        state.ticks, state.elapsed))
+    local ok, detail = api.send_reload()
+    debug_emit(string.format('DEBUG_CONTINUOUS_SEND_END tick=%d elapsed=%.3f ok=%s detail=%s',
+        state.ticks, state.elapsed, tostring(ok), tostring(detail)))
+    emit(string.format(
+        'RELOAD_REQUEST tick=%d elapsed=%.3f reason=continuous_load sent=%s detail=%s resource=%s mag=%s chamber=%s',
+        state.ticks, state.elapsed, tostring(ok), tostring(detail),
+        tostring(row.current_weapon_resource), tostring(row.rounds_magazine_count),
+        tostring(row.rounds_chamber_token)))
+    if ok then state.attempted = true; state.request_at = state.elapsed end
 end
 
 emit('START revision=' .. state.revision .. ' debug=' .. tostring(DEBUG) .. ' reload_delay=1 heat_overheat_reload=true rounds_and_magazine=true no_native_calls=true no_memory_writes=true input_injection=true')
@@ -736,6 +812,7 @@ local function update(dt, ...)
                 state.ticks, state.elapsed))
         end
         auto_reload_step()
+        continuous_reload_step()
         if trace_step then
             debug_emit(string.format('DEBUG_AUTO_STEP_END tick=%d elapsed=%.3f',
                 state.ticks, state.elapsed))

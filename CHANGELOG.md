@@ -1,5 +1,11 @@
 # Changelog
 
+## function-test-fork (local test branch)
+
+- Add early reload policies for APW-1 AMR and R-36 Eruptor at magazine count 1.
+- Add continuous R requests at low ammo for SG-97 Sweeper (four total rounds) and GL-15 Evictor (two total rounds), with fresh context checks, manual R suppression, and request logging.
+- Keep the one-time `GetAsyncKeyState` FFI declaration from v0.5.1.
+
 ## 0.5.1
 
 - Declare `GetAsyncKeyState` once during API initialization and reuse its binding in the per-frame input probe.

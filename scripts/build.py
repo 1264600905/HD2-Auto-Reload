@@ -42,10 +42,10 @@ def main():
     BUILD.mkdir(parents=True, exist_ok=True)
     entry = BUILD / ('auto_reload_entry_debug.lua' if args.debug else 'auto_reload_entry.lua')
     entry.write_text(generated, encoding='utf-8', newline='\n')
-    output = BUILD / ('Auto-Reload-v0.5.1-debug.zip' if args.debug else 'Auto-Reload-v0.5.1.zip')
+    output = BUILD / ('Auto-Reload-function-test-fork-debug.zip' if args.debug else 'Auto-Reload-function-test-fork.zip')
     build_addon('mods/liu/auto_reload_rounds', generated.encode('utf-8'),
                 '4df5aee3-3c5d-47fc-b0e9-0a40f7988738', output,
-                'Auto Reload v0.5.1' + (' Debug' if args.debug else '') +
+                'Auto Reload function-test-fork' + (' Debug' if args.debug else '') +
                 ' (1s; Heat; build 25327279)')
     print('Built', output)
 

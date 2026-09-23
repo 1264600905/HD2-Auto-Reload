@@ -43,13 +43,14 @@ python scripts/build.py
 python scripts/build.py --game-dir '你的 Steam 游戏目录/Helldivers 2'
 ```
 
-产物为 `build/Auto-Reload-v0.5.1.zip`。`build/` 不纳入源码提交。
+当前 `function-test-fork` 本地测试分支的产物为 `build/Auto-Reload-function-test-fork.zip`；正式发布版仍从上面的 v0.5.1 Release 下载。`build/` 不纳入源码提交。
+测试分支让 AMR 和 R-36 在 `magazine_count <= 1` 时请求换弹，并为 Sweeper（总弹 ≤4）和 Evictor（总弹 ≤2）提供约 0.1 秒间隔的持续装弹请求。普通测试包的日志版本为 `auto-reload-function-test-fork`。
 组件 map 以十六进制文本保存在 `data/`，构建时嵌入 Lua；运行时验证完整指纹、资源记录和实体身份。
 游戏内还会验证 DLL PE 标识，以及玩家、实体、物品栏、Rounds、Magazine 和 Heat 的已核对指令片段。v5 使用新版 Magazine/Rounds/Heat 全表指纹和定点槽位。
 
 排查空仓附近闪退时可构建 `python scripts/build.py --debug`，产物为
-`build/Auto-Reload-v0.5.1-debug.zip`。调试包沿用同一 GUID，应替换普通版并重启游戏。
-日志的 `START` 行会显示 `revision=auto-reload-0.5.1-debug debug=true`；
+`build/Auto-Reload-function-test-fork-debug.zip`。调试包沿用同一 GUID，应替换普通版并重启游戏。
+日志的 `START` 行会显示 `revision=auto-reload-function-test-fork-debug debug=true`；
 `DEBUG_SNAPSHOT_*`、`DEBUG_AUTO_STEP_*`、`DEBUG_RELOAD_*` 和 `DEBUG_SENDINPUT_*`
 会在接近空仓及请求换弹时记录调用边界。
 日志仍位于 `%LOCALAPPDATA%/CowboyBingus/Helldivers2/Logs/AutoReloadRounds.log`。
