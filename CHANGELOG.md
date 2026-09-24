@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.1
+
+- Fix `SendInput` FFI type collisions with other loaded addons.
+- Publish rebuilt ordinary, tactical, and diagnostic packages.
+
 ## 0.6.0
 
 - Publish configurable tactical thresholds, immediate empty reloads, window-scoped click delays, and manual suppression removal.

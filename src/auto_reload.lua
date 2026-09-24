@@ -11,7 +11,7 @@ local CONTINUOUS_RELOAD_INTERVAL_SECONDS = 0.1
 local TACTICAL_RAPID_CLICK_WINDOW_SECONDS = 0.5
 local TACTICAL_CLICK_DELAYS = {0.1, 0.2, 0.4, 0.6}
 -- RELOAD_CONFIG_INSERT
-local state = {revision = DEBUG and 'auto-reload-0.6.0-debug' or 'auto-reload-0.6.0',
+local state = {revision = DEBUG and 'auto-reload-0.6.1-debug' or 'auto-reload-0.6.1',
     ticks = 0, elapsed = 0, snapshots = 0,
     latest_row = nil,
     lmb_edge_time = nil, empty_since = nil, attempted = false, identity = nil,
@@ -78,7 +78,6 @@ local function read_api()
         uint32_t GetCurrentProcessId(void);
         void *GetForegroundWindow(void);
         uint32_t GetWindowThreadProcessId(void *, uint32_t *);
-        uint32_t SendInput(uint32_t, const void *, int);
         uint64_t GetTickCount64(void);
         short GetAsyncKeyState(int key);
     ]])
@@ -86,6 +85,8 @@ local function read_api()
         (cdef_ok and '' or ' error=' .. tostring(cdef_error)))
     local kernel = ffi.load('kernel32')
     local user32 = ffi.load('user32')
+    local send_input = ffi.cast(
+        'uint32_t (__stdcall *)(uint32_t, const void *, int)', user32.SendInput)
     local get_async_key_state = user32.GetAsyncKeyState
     local process = kernel.GetCurrentProcess()
     local process_id = kernel.GetCurrentProcessId()
@@ -130,7 +131,7 @@ local function read_api()
         ffi.cast('uint32_t *', input + 12)[0] = up and 10 or 8
         debug_emit(string.format('DEBUG_SENDINPUT_BEGIN tick=%d elapsed=%.3f action=%s',
             state.ticks, state.elapsed, up and 'keyup' or 'keydown'))
-        local sent = tonumber(user32.SendInput(1, input, 40))
+        local sent = tonumber(send_input(1, input, 40))
         debug_emit(string.format('DEBUG_SENDINPUT_END tick=%d elapsed=%.3f action=%s sent=%s',
             state.ticks, state.elapsed, up and 'keyup' or 'keydown', tostring(sent)))
         return sent == 1
