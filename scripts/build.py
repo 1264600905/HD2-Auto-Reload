@@ -21,7 +21,7 @@ INSERT = (ROOT / 'src/component_maps.lua').read_text(encoding='utf-8')
 RELOAD_CONFIG = ROOT / 'src/reload_config.lua'
 RULE_LINE = re.compile(
     r"\s*\['([0-9a-f]{16})'\] = \{name='[^']+', path='(weapon_magazine|weapon_rounds)', "
-    r"limit=(\d+)(?:, basis='(magazine|total)')?(?:, continuous=(true|false))?\},?\s*"
+    r"limit=(\d+)(?:, basis='(magazine|total)')?(?:, continuous=(true|false))?(?:, immediate=(true|false))?\},?\s*"
 )
 ATTACK_LINE = re.compile(r"\s*\['([0-9a-f]{16})'\] = true,?\s*(?:--.*)?")
 
@@ -49,7 +49,7 @@ def validate_reload_config(config):
         match = RULE_LINE.fullmatch(line.split('--', 1)[0].rstrip())
         if not match:
             raise ValueError('Invalid tactical rule: ' + line.strip())
-        resource_id, path, limit, basis, continuous = match.groups()
+        resource_id, path, limit, basis, continuous, immediate = match.groups()
         if resource_id in seen or resource_id not in known[path]:
             raise ValueError('Duplicate or unmatched tactical resource: ' + resource_id)
         if int(limit) > 100000 or (basis == 'total' and path != 'weapon_rounds') or (
@@ -111,7 +111,7 @@ def main():
                 '4df5aee3-3c5d-47fc-b0e9-0a40f7988738', output,
                 'Auto Reload configurable' + (' tactical' if args.enable_tactical_reload else '') +
                 (' Debug' if args.debug else '') +
-                ' (1s; Heat; build 25327279)')
+                ' (immediate; Heat; build 25327279)')
     print('Built', output)
 
 if __name__ == '__main__':

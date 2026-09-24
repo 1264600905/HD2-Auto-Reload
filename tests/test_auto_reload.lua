@@ -3,6 +3,7 @@ local file = assert(io.open('src/auto_reload.lua', 'rb'))
 local source = file:read('*a'); file:close()
 local built = assert(io.open('build/auto_reload_entry.lua', 'rb'))
 local generated = built:read('*a'); built:close()
+local input_code = assert(source:match('(local function input_probe%(%).-)\nlocal function truly_empty'))
 local controller = assert(generated:match('(local function truly_empty.-)\nemit%(%\'START'))
 local policies = assert(generated:match('(local CONTINUOUS_RELOAD_INTERVAL_SECONDS =.-)\nlocal state ='))
 local tests = 0
@@ -12,9 +13,14 @@ local function scenario(tactical_enabled)
         rounds_magazine_count=0, rounds_chambered=false}
     local state = {elapsed=0, ticks=0, latest_row=row, latest_at=0, keys={}}
     local sent, logs, fresh, focused, own_down = 0, {}, row, true, false
-    local api = {game_focused=function() return focused end,
+    local raw_keys = {}
+    local send_ok = true
+    local api = {key_state=function(code) return raw_keys[code] or 0 end, game_focused=function() return focused end,
         own_reload_active=function() return own_down end,
-        send_reload=function() sent=sent+1; return true,'test' end}
+        send_reload=function()
+            if not send_ok then return false,'keyup_frame_pending' end
+            sent=sent+1; return true,'test'
+        end}
     local selected_policies = policies
     if tactical_enabled then
         local count
@@ -23,16 +29,18 @@ local function scenario(tactical_enabled)
         assert(count == 1)
     end
     local factory = assert(loadstring(selected_policies .. '\n' .. controller ..
-        '\nreturn auto_reload_step, rounds_empty, continuous_reload_step'))
+        '\n' .. input_code .. '\nreturn auto_reload_step, rounds_empty, continuous_reload_step, input_probe'))
     setfenv(factory, setmetatable({RELOAD_DELAY_SECONDS=1, state=state, api=api,
-        unsafe_resources={unsafe=true},
+        bit=require('bit'), unsafe_resources={unsafe=true},
         context_reader=function() return fresh end,
         emit=function(s) logs[#logs+1]=s end, debug_emit=function() end,
         scalar=tostring}, {__index=_G}))
-    local step, empty, continuous = factory()
-    return {row=row, state=state, logs=logs, empty=empty, sent=function() return sent end,
+    local step, empty, continuous, probe = factory()
+    return {row=row, state=state, logs=logs, empty=empty,
+        probe=function(t, r) state.elapsed=t; raw_keys[0x52]=r and -32768 or 0; probe() end, sent=function() return sent end,
         fresh=function(value) fresh=value end, focus=function(value) focused=value end,
         own_key=function(value) own_down=value end,
+        allow_send=function(value) send_ok=value end,
         click=function(t) state.last_lmb_press_at=t; state.lmb_edge_time=t end,
         step=function(t) state.elapsed=t; state.latest_at=t; step() end,
         continuous_step=function(t) state.elapsed=t; state.latest_at=t; step(); continuous() end}
@@ -40,16 +48,16 @@ end
 local function test(name, fn)
     fn(); tests=tests+1; print('PASS ' .. name)
 end
-test('empty timer sends only once', function()
-    local s=scenario(); s.step(0); s.step(.99); assert(s.sent()==0)
+test('empty reload sends immediately and only once', function()
+    local s=scenario(); s.step(0); assert(s.sent()==1); s.step(.99); assert(s.sent()==1)
     s.step(1); s.step(7); assert(s.sent()==1)
 end)
-test('AMR requests at one magazine round and still works at zero', function()
+test('AMR waits for zero magazine rounds', function()
     local s=scenario(true); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
     s.row.magazine_chamber_token=40
     s.row.current_weapon_resource='89c5493e08ca4207'
     s.row.magazine_count=2; assert(not s.empty(s.row))
-    s.row.magazine_count=1; assert(s.empty(s.row))
+    s.row.magazine_count=1; assert(not s.empty(s.row))
     s.row.magazine_count=0; assert(s.empty(s.row))
     s.row.current_weapon_resource='ordinary'
     assert(not s.empty(s.row))
@@ -72,7 +80,7 @@ test('Sweeper and Evictor thresholds include a chambered round', function()
     s.row.rounds_magazine_count=1; assert(s.empty(s.row))
 end)
 
-test('tactical switch gates existing and new early reload rules', function()
+test('tactical switch gates zero-magazine reload rules', function()
     local off=scenario(); off.row.ammo_path='weapon_magazine'; off.row.magazine_verified=true
     off.row.current_weapon_resource='89c5493e08ca4207'; off.row.magazine_count=1
     off.row.magazine_chamber_token=259
@@ -80,18 +88,21 @@ test('tactical switch gates existing and new early reload rules', function()
     off.row.magazine_count=0; assert(not off.empty(off.row))
     off.row.magazine_chamber_token=0; assert(off.empty(off.row))
     local on=scenario(true); on.row.ammo_path='weapon_magazine'; on.row.magazine_verified=true
-    on.row.current_weapon_resource='89c5493e08ca4207'; on.row.magazine_count=1
+    on.row.current_weapon_resource='89c5493e08ca4207'; on.row.magazine_count=0
     on.row.magazine_chamber_token=259; assert(on.empty(on.row))
 end)
 
 test('configured magazine families use exact player-held resource IDs', function()
     local s=scenario(true); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
-    s.row.magazine_count=1; s.row.magazine_chamber_token=259
+    s.row.magazine_count=11; s.row.magazine_chamber_token=259
     for _,id in ipairs({'84354339522c932d','a955c4ea6f6d4203',
         '4c786785c79d44e7','8a307bd1811a5fe9','dbb6c961c59fadc1',
         'b43235dbd493750c','1d5943301a29c940'}) do
-        s.row.current_weapon_resource=id; assert(s.empty(s.row),id)
+        s.row.current_weapon_resource=id; assert(not s.empty(s.row),id)
+        s.row.magazine_count=0; assert(s.empty(s.row),id)
+        s.row.magazine_count=11
     end
+    s.row.magazine_count=0
     for _,id in ipairs({'80f1a156d9fa1e36', -- JAR-5
         'a32621e3bde13379', -- AX/AR-23 Guard Dog
         '54d86057f5dacfb9'}) do -- AC-8 sentry
@@ -108,8 +119,10 @@ test('new rounds thresholds use magazine count and AC-8 stays single request', f
     s.row.rounds_magazine_count=8; assert(s.empty(s.row))
     s.row.rounds_magazine_count=9; assert(not s.empty(s.row))
     s.row.current_weapon_resource='a8cffb316f0b5c5f' -- AC-8
-    s.row.rounds_magazine_count=1; assert(s.empty(s.row))
+    s.row.rounds_magazine_count=1; assert(not s.empty(s.row))
+    s.row.rounds_magazine_count=0; assert(s.empty(s.row))
     s.continuous_step(0); assert(s.sent()==1)
+    s.continuous_step(.99); assert(s.sent()==1)
     s.continuous_step(1); assert(s.sent()==1)
     s.continuous_step(1.2); assert(s.sent()==1)
 end)
@@ -152,15 +165,15 @@ test('continuous loading repeats at 0.1 seconds and records each request', funct
     local log=table.concat(s.logs,'\n')
     assert(select(2,log:gsub('reason=continuous_load',''))==2)
 end)
-test('manual R and stale context suppress continuous loading', function()
+test('manual R does not suppress continuous loading but stale context does', function()
     local s=scenario(true); s.row.current_weapon_resource='006e44327bb953fe'
     s.row.rounds_chambered=true; s.row.rounds_chamber_token=297
     s.row.rounds_magazine_count=1; s.state.keys.R=true
     s.continuous_step(0); assert(s.sent()==0)
-    s.state.keys.R=false; s.continuous_step(.2); assert(s.sent()==0)
+    s.state.keys.R=false; s.continuous_step(.2); assert(s.sent()==1)
     s.row.rounds_magazine_count=3; s.continuous_step(.3)
-    s.row.rounds_magazine_count=1; s.fresh({}); s.continuous_step(.4); assert(s.sent()==0)
-    s.fresh(s.row); s.continuous_step(.51); assert(s.sent()==1)
+    s.row.rounds_magazine_count=1; s.fresh({}); s.continuous_step(.4); assert(s.sent()==1)
+    s.fresh(s.row); s.continuous_step(.51); assert(s.sent()==2)
 end)
 test('our injected R does not suppress the next continuous request', function()
     local s=scenario(true); s.row.current_weapon_resource='dcd1c835407ef7ba'
@@ -171,6 +184,31 @@ test('our injected R does not suppress the next continuous request', function()
     assert(s.sent()==1 and not s.state.manual_reload_episode)
     s.state.keys.R=false; s.own_key(false); s.continuous_step(.21)
     assert(s.sent()==2)
+end)
+
+test('click delays start at window entry and reset after leaving it', function()
+    for _,continuous in ipairs({false,true}) do
+        local s=scenario(true)
+        if continuous then
+            s.row.current_weapon_resource='41eac4a03987faa0' -- SG-8, limit 8
+        else
+            s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
+            s.row.current_weapon_resource='05d8d8c073b9d502' -- SG-8P, limit 8
+        end
+        local field=continuous and 'rounds_magazine_count' or 'magazine_count'
+        local step=continuous and s.continuous_step or s.step
+        s.row[field]=9
+        for _,t in ipairs({0,.05,.1,.15}) do s.click(t); step(t) end
+        assert(s.state.tactical_click_tier==nil)
+        s.row[field]=8; step(.2); step(.299); assert(s.sent()==0)
+        step(.301); assert(s.sent()==1) -- full 0.1 from entry, not last outside click
+        s.click(.31); step(.31); s.click(.35); step(.35)
+        assert(s.state.tactical_click_tier==2)
+        s.row[field]=9; step(.36)
+        assert(s.state.tactical_window_since==nil and s.state.tactical_click_tier==nil)
+        s.row[field]=8; step(.4); step(.499); assert(s.sent()==1)
+        step(.501); assert(s.sent()==2) -- old tier and old click were discarded
+    end
 end)
 
 test('rapid clicks lengthen tactical wait from last click to 0.6 seconds', function()
@@ -234,38 +272,55 @@ end)
 
 test('one-round request waits for our key release and rearms on ammo change', function()
     local s=scenario(true); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
-    s.row.current_weapon_resource='89c5493e08ca4207' -- APW-1
+    s.row.current_weapon_resource='05d8d8c073b9d502' -- SG-8P retains limit 8
     s.row.magazine_count=1; s.row.magazine_chamber_token=259
     s.own_key(true); s.step(0); assert(s.sent()==0)
     s.own_key(false); s.step(.081); assert(s.sent()==1)
     s.step(1); assert(s.sent()==1)
-    s.row.magazine_count=2; s.step(2)
+    s.row.magazine_count=9; s.step(2)
     s.row.magazine_count=1; s.step(3); assert(s.sent()==2)
 end)
 
-test('one-round request rejects a fresh count that already changed', function()
+test('fresh ammo dropping to zero still requests immediately', function()
     local s=scenario(true); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
     s.row.current_weapon_resource='05d8d8c073b9d502'
     s.row.magazine_count=1; s.row.magazine_chamber_token=259
     local fresh={}; for k,v in pairs(s.row) do fresh[k]=v end
     fresh.magazine_count=0; s.fresh(fresh)
-    s.step(0); s.step(.1); assert(s.sent()==0)
+    s.step(0); s.step(.1); assert(s.sent()==1)
 end)
 
-test('manual R still suppresses the one-round tactical request', function()
+test('manual R does not suppress the one-round tactical request', function()
     local s=scenario(true); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
-    s.row.current_weapon_resource='89c5493e08ca4207'
+    s.row.current_weapon_resource='05d8d8c073b9d502' -- SG-8P retains limit 8
     s.row.magazine_count=1; s.row.magazine_chamber_token=259
-    s.state.keys.R=true; s.step(0); assert(s.sent()==0)
-    s.state.keys.R=false; s.step(.1); assert(s.sent()==0)
+    s.state.keys.R=true; s.step(0); assert(s.sent()==1)
+    s.state.keys.R=false; s.step(.1); assert(s.sent()==1)
 end)
 
-test('zero rounds keep the old timed path', function()
-    local s=scenario(true); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
-    s.row.current_weapon_resource='b6aff2195568767f' -- R-36, limit zero
-    s.row.magazine_count=0; s.row.magazine_chamber_token=259
-    s.step(0); s.step(.99); assert(s.sent()==0)
-    s.step(1); assert(s.sent()==1)
+test('zero-limit tactical rules request immediately and retry on a new attack', function()
+    for _,id in ipairs({'b6aff2195568767f', '89c5493e08ca4207'}) do
+        local s=scenario(true); s.row.ammo_path='weapon_magazine'
+        s.row.magazine_verified=true; s.row.current_weapon_resource=id
+        s.row.magazine_count=0; s.row.magazine_chamber_token=259
+        s.step(0); assert(s.sent()==1, id)
+        s.step(.5); assert(s.sent()==1, id)
+        s.click(.6); s.step(.6); assert(s.sent()==2, id)
+        s.step(.7); assert(s.sent()==2, id)
+    end
+end)
+test('zero-limit request ignores manual R but rejects a changed fresh count', function()
+    local manual=scenario(true); manual.row.ammo_path='weapon_magazine'
+    manual.row.magazine_verified=true; manual.row.current_weapon_resource='89c5493e08ca4207'
+    manual.row.magazine_count=0; manual.row.magazine_chamber_token=259
+    manual.state.keys.R=true; manual.step(0)
+    manual.state.keys.R=false; manual.step(.1); assert(manual.sent()==1)
+    local stale=scenario(true); stale.row.ammo_path='weapon_magazine'
+    stale.row.magazine_verified=true; stale.row.current_weapon_resource='89c5493e08ca4207'
+    stale.row.magazine_count=0; stale.row.magazine_chamber_token=259
+    local fresh={}; for k,v in pairs(stale.row) do fresh[k]=v end
+    fresh.magazine_count=1; stale.fresh(fresh); stale.step(0); assert(stale.sent()==0)
+    stale.fresh(stale.row); stale.step(.1); assert(stale.sent()==1)
 end)
 test('held fire triggers after empty observation', function()
     local s=scenario(); s.state.keys.LMB=true; s.step(0); s.step(.16); assert(s.sent()==1)
@@ -276,16 +331,17 @@ test('ready chamber and missing configuration do not authorize reload', function
     s.row.rounds_chambered=nil; s.step(5); s.step(9); assert(s.sent()==0)
 end)
 test('stale attack before empty does not trigger', function()
-    local s=scenario(); s.state.lmb_edge_time=.9; s.step(1); assert(s.sent()==0)
+    local s=scenario(); s.row.current_weapon_resource='9f80d67a12a7e40f'
+    s.state.lmb_edge_time=.9; s.step(1); assert(s.sent()==0)
 end)
 test('fresh selection mismatch rejects stale request', function()
-    local s=scenario(); s.step(0); s.fresh({}); s.step(3); assert(s.sent()==0)
+    local s=scenario(); s.fresh({}); s.step(0); s.step(3); assert(s.sent()==0)
 end)
 test('failed fresh read rejects request', function()
-    local s=scenario(); s.step(0); s.fresh(nil); s.step(3); assert(s.sent()==0)
+    local s=scenario(); s.fresh(nil); s.step(0); s.step(3); assert(s.sent()==0)
 end)
-test('focus, ownership, and manual R inhibit input', function()
-    for _,mode in ipairs({'focus','owned','manual'}) do
+test('focus and ownership inhibit input', function()
+    for _,mode in ipairs({'focus','owned'}) do
         local s=scenario()
         if mode=='focus' then s.focus(false)
         elseif mode=='owned' then s.row.weapon_owned=false
@@ -314,7 +370,7 @@ test('magazine last chamber round is preserved even when blocked', function()
 end)
 test('magazine fresh refill cancels queued input', function()
     local s=scenario(); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
-    s.row.magazine_count=0; s.row.magazine_chamber_token=0; s.step(0)
+    s.row.magazine_count=0; s.row.magazine_chamber_token=0
     local fresh={}; for k,v in pairs(s.row) do fresh[k]=v end
     fresh.magazine_count=10; s.fresh(fresh); s.step(3); assert(s.sent()==0)
 end)
@@ -354,12 +410,12 @@ test('native magazine reader validates entity and exact layout', function()
     verified=false; row={}; reader(e,row); assert(not row.magazine_verified)
     assert(row.ammo_status=='magazine_static_identity_unverified')
 end)
-test('burned heat sink waits a full second even while firing', function()
+test('burned heat sink requests immediately even while firing', function()
     for _,slot in ipairs({1,2,3}) do
         local s=scenario(); s.row.ammo_path='weapon_heat'; s.row.selected_slot=slot
         s.row.heat_verified=true; s.row.heat_requires_replacement=true; s.row.heat_overheated=true
         s.state.keys.LMB=true; s.state.lmb_edge_time=0
-        s.step(0); s.step(.16); s.step(.99); assert(s.sent()==0)
+        s.step(0); assert(s.sent()==1); s.step(.16); s.step(.99); assert(s.sent()==1)
         s.step(1); s.step(5); assert(s.sent()==1)
     end
 end)
@@ -376,18 +432,17 @@ test('heat fresh unlock and entity reuse cancel pending request', function()
     for _,field in ipairs({'heat_overheated','heat_verified','_weapon_bytes','selected_slot'}) do
         local s=scenario(); s.row.ammo_path='weapon_heat'; s.row._weapon_bytes='identity A'
         s.row.heat_verified=true; s.row.heat_requires_replacement=true; s.row.heat_overheated=true
-        s.step(0)
         local fresh={}; for k,v in pairs(s.row) do fresh[k]=v end
         fresh[field]=false; s.fresh(fresh); s.step(2); assert(s.sent()==0)
     end
 end)
 
-test('manual heat replacement suppresses duplicate automatic request after key release', function()
+test('manual R does not suppress burned heat reload', function()
     local s=scenario(); s.row.ammo_path='weapon_heat'
     s.row.heat_verified=true; s.row.heat_requires_replacement=true; s.row.heat_overheated=true
-    s.step(0); s.state.keys.R=true; s.step(.5); s.state.keys.R=false
-    s.step(2); s.step(5); assert(s.sent()==0)
-    s.state.lmb_edge_time=6; s.step(6); assert(s.sent()==1)
+    s.state.keys.R=true; s.step(0); s.step(.5); s.state.keys.R=false
+    s.step(2); s.step(5); assert(s.sent()==1)
+    s.state.lmb_edge_time=6; s.step(6); assert(s.sent()==2)
 end)
 
 test('heat unlock rearms next episode without claiming confirmed reload', function()
@@ -439,10 +494,10 @@ test('native heat reader checks identity, flags and effective override', functio
     memory[0x100000+0x764efa]=string.rep('\0',7); assert(not pcall(reader,e,{}))
 end)
 
-test('explicit attack retries after request cooldown', function()
+test('explicit attack retries without a two second cooldown', function()
     local s=scenario(); s.step(0); s.step(3)
-    s.state.lmb_edge_time=3.5; s.step(3.5); assert(s.sent()==1)
-    s.state.lmb_edge_time=5.1; s.step(5.1); assert(s.sent()==2)
+    s.state.lmb_edge_time=3.5; s.step(3.5); assert(s.sent()==2)
+    s.state.lmb_edge_time=5.1; s.step(5.1); assert(s.sent()==3)
 end)
 test('no ammo recovery is reported as unconfirmed', function()
     local s=scenario(); s.step(0); s.step(3); s.step(11)
@@ -453,13 +508,69 @@ test('ammo recovery permits next empty episode', function()
     assert(table.concat(s.logs,'\n'):find('AMMO_RECOVERED_AFTER_REQUEST',1,true))
     s.row.rounds_magazine_count=0; s.step(5); s.step(8); assert(s.sent()==2)
 end)
+
+test('M105 manual R then firing to zero never disables automatic requests', function()
+    local s=scenario(true); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
+    s.row.current_weapon_resource='a6a735accb4a327f'; s.row.magazine_chamber_token=276
+    s.row.magazine_count=10; s.step(0); assert(s.sent()==1)
+    s.row.magazine_count=7; s.step(.3); assert(s.sent()==2)
+    s.probe(.8,true); s.step(.8); s.probe(1.6,false); s.step(1.6)
+    s.row.magazine_count=3; s.click(2); s.step(2); assert(s.sent()==3)
+    s.row.magazine_count=0; s.step(3); assert(s.sent()==4)
+    s.row.magazine_chamber_token=0; s.click(4); s.step(4); assert(s.sent()==5)
+end)
+
+test('release-frame deferral does not consume an immediate attack retry', function()
+    local s=scenario(true); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
+    s.row.current_weapon_resource='a6a735accb4a327f'; s.row.magazine_count=0
+    s.row.magazine_chamber_token=0; s.step(0); assert(s.sent()==1)
+    s.allow_send(false); s.click(.1); s.step(.1)
+    assert(s.sent()==1 and s.state.last_request==0)
+    s.allow_send(true); s.step(.116); assert(s.sent()==2)
+    s.step(.132); assert(s.sent()==2)
+end)
+
+test('manual or startup held R never changes request state', function()
+    local s=scenario(); s.probe(0,true); s.step(0); assert(s.sent()==1)
+    s.probe(.5,true); s.step(.5); assert(s.state.last_request==0)
+    s.probe(.6,false); s.click(.6); s.step(.6); assert(s.sent()==2)
+end)
+
+test('plan 2 fast rules fire in the threshold update even during rapid clicks', function()
+    for _,entry in ipairs({{'84354339522c932d',3}, {'a955c4ea6f6d4203',3},
+        {'5fecab819f96a3e8',3}, {'4ba41b6f9f405cc2',3}, {'be70ee0d8d44028e',3},
+        {'8a307bd1811a5fe9',3}, {'05e4e5c2db6e44a2',3}, {'3575aabc5f1f9326',3},
+        {'4d58c77087b774c5',3}, {'a6a735accb4a327f',10}, {'b43235dbd493750c',10}}) do
+        local s=scenario(true); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
+        s.row.current_weapon_resource=entry[1]; s.row.magazine_chamber_token=259
+        s.row.magazine_count=entry[2]+1
+        s.click(0); s.step(0); s.click(.03); s.step(.03); assert(s.sent()==0)
+        s.row.magazine_count=entry[2]; s.click(.04); s.step(.04); assert(s.sent()==1,entry[1])
+        s.step(.05); assert(s.sent()==1)
+        s.row.magazine_count=0; s.step(.06); assert(s.sent()==2)
+    end
+end)
+
+test('fast rule accepts fresh ammo falling below the observed threshold', function()
+    local s=scenario(true); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
+    s.row.current_weapon_resource='84354339522c932d'; s.row.magazine_count=3
+    local fresh={}; for k,v in pairs(s.row) do fresh[k]=v end
+    fresh.magazine_count=0; s.fresh(fresh); s.step(0); assert(s.sent()==1)
+end)
+
+test('new weapon is not delayed by previous weapons request', function()
+    local s=scenario(); s.step(0); assert(s.sent()==1)
+    s.row.selected_entity_id=2; s.step(.01); assert(s.sent()==2)
+end)
+
 test('scan-code press spans frames and failed keyup is retried', function()
     local ffi = require('ffi')
     local now, focused, fail_up, events = 1000, true, false, {}
+    local stuck_r=false
     local user = {
         GetForegroundWindow=function() return ffi.cast('void *', 1) end,
         GetWindowThreadProcessId=function(_, owner) owner[0]=focused and 123 or 999 end,
-        GetAsyncKeyState=function() return 0 end,
+        GetAsyncKeyState=function() return stuck_r and -32768 or 0 end,
         SendInput=function(count, input, size)
             assert(count==1 and size==40)
             local kind=tonumber(ffi.cast('uint32_t *',input)[0])
@@ -478,8 +589,9 @@ test('scan-code press spans frames and failed keyup is retried', function()
     local chunk=assert(source:match('(local function read_api%(%).-)%\nlocal function context_reader'))
     local factory=assert(loadstring(chunk .. '\nreturn read_api()'))
     setfenv(factory,setmetatable({require=function() return shim end,
-        debug_emit=function() end, state={ticks=0,elapsed=0}},{__index=_G}))
+        bit=require('bit'), debug_emit=function() end, state={ticks=0,elapsed=0}},{__index=_G}))
     local api=factory()
+    local function next_frame() getfenv(factory).state.ticks=getfenv(factory).state.ticks+1 end
     assert(api.key_state(1)==0 and not api.own_reload_active())
     assert(api.send_reload()); assert(#events==1 and events[1]==8 and api.own_reload_active())
     now=1070; assert(api.release_reload()); assert(#events==1)
@@ -487,7 +599,16 @@ test('scan-code press spans frames and failed keyup is retried', function()
     assert(not api.send_reload())
     fail_up=false; assert(api.release_reload()); assert(events[3]==10 and not api.own_reload_active())
     focused=false; assert(not api.send_reload()); assert(#events==3)
-    focused=true; assert(api.send_reload()); focused=false
+    focused=true; assert(not api.send_reload()); assert(#events==3)
+    next_frame(); assert(api.send_reload()); focused=false
     assert(api.release_reload(true)); assert(events[5]==10)
+    focused=true; assert(not api.send_reload()); assert(#events==5)
+    next_frame(); stuck_r=true; fail_up=true
+    assert(not api.send_reload()); assert(events[6]==10 and not api.own_reload_active())
+    fail_up=false; assert(not api.send_reload())
+    assert(events[7]==10 and not api.own_reload_active())
+    stuck_r=false; assert(not api.send_reload()); assert(#events==7)
+    next_frame(); now=now+16; assert(api.send_reload())
+    assert(events[8]==8 and api.own_reload_active())
 end)
 print(string.format('%d tests passed',tests))

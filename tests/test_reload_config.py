@@ -27,6 +27,21 @@ class ReloadConfigTests(unittest.TestCase):
             self.assertNotIn(excluded, ids)
         self.assertIn('05d8d8c073b9d502', ids)  # SG-8P
 
+    def test_plan_two_thresholds_and_immediate_policy(self):
+        rules = re.findall(r"name='([^']+)', path='[^']+', limit=(\d+)([^}]*)", self.config)
+        fast = 0
+        for name, limit, options in rules:
+            expected = (10 if name.startswith('M-105') else
+                        3 if name.startswith(('AR', 'SMG')) or name in
+                        ('BR-14', 'M7S', 'StA-11', 'P-2', 'P-19', 'M6C/SOCOM') else None)
+            if expected is not None:
+                fast += 1
+                self.assertEqual(int(limit), expected, name)
+                self.assertIn('immediate=true', options, name)
+            else:
+                self.assertNotIn('immediate=true', options, name)
+        self.assertEqual(fast, 22)
+
     def test_existing_total_thresholds_are_retained(self):
         for name, limit in (('SG-97', 4), ('GL-15', 2)):
             self.assertRegex(self.config, re.escape("name='" + name + "', path='weapon_rounds', ") +

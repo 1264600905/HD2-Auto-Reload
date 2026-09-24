@@ -1,5 +1,19 @@
 # Changelog
 
+## manual suppression removal (local v4)
+
+- Remove all manual R suppression of automatic reload requests, including the episode latch that blocked M-105 after manual input and further firing to empty.
+- Require a separate update between synthetic R release and the next press. Failed sends no longer consume the attack retry or update the accepted-request timestamp.
+- Reproduce the observed M-105 sequence in controller tests and verify release-frame separation in the input API test.
+
+## immediate reload and plan 2 (local test branch)
+
+- Fix startup R held-state blocking every automatic request. Ignore the inherited level, release it before a new synthetic press, and distinguish our own held R from a new manual press. A manual hold no longer renews the request cooldown every frame.
+- Remove the fixed one-second empty/heat delay and the two-second attack retry limiter. Read ammo each focused update; preserve fresh identity checks and attack-only stationary weapons.
+- Apply plan 2: 3 magazine rounds for the listed fast weapons; 10 for M-105 and its handheld MK3. These 22 rules bypass the click wait. Preserve other zero thresholds and the 0.1/0.2/0.4/0.6-second rapid-click policy for other tactical weapons.
+- Accept ammo decreasing during the immediate pre-input recheck; still reject refills above the observed count and changed identities.
+- Regression coverage includes startup stuck R, our injected R release, manual input, threshold crossings, rapid clicks, and stale contexts. Game confirmation is still required.
+
 ## immediate one-round tactical request (local test branch)
 
 - When a configured tactical threshold includes one round and that count is observed, refresh its context and exact ammo count in the same update, then request R without the attack or idle delays.

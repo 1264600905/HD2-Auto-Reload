@@ -7,16 +7,15 @@ local existing = rawget(_G, 'LiuAutoReloadRounds')
 if existing then return existing end
 
 local DEBUG = false -- DEBUG_BUILD_FLAG
-local RELOAD_DELAY_SECONDS = 1
 local CONTINUOUS_RELOAD_INTERVAL_SECONDS = 0.1
 local TACTICAL_RAPID_CLICK_WINDOW_SECONDS = 0.5
 local TACTICAL_CLICK_DELAYS = {0.1, 0.2, 0.4, 0.6}
 -- RELOAD_CONFIG_INSERT
-local state = {revision = DEBUG and 'auto-reload-configurable-fast-one-25327279-debug' or 'auto-reload-configurable-fast-one-25327279',
+local state = {revision = DEBUG and 'auto-reload-configurable-immediate-v4-25327279-debug' or 'auto-reload-configurable-immediate-v4-25327279',
     ticks = 0, elapsed = 0, snapshots = 0,
     latest_row = nil,
     lmb_edge_time = nil, empty_since = nil, attempted = false, identity = nil,
-    critical_one_requested = false}
+    critical_one_requested = false, critical_zero_requested = false}
 -- MG-43's earlier crash report remains unresolved. Its guarded Magazine
 -- reader path is enabled experimentally at the user's request.
 local unsafe_resources = {}
@@ -121,7 +120,7 @@ local function read_api()
         return tonumber(owner[0]) == tonumber(process_id)
     end
     function api.key_state(code) return tonumber(get_async_key_state(code)) end
-    local release_at
+    local release_at, released_tick
     function api.own_reload_active() return release_at ~= nil end
     local function key_event(up)
         local input = ffi.new('uint8_t[40]')
@@ -139,7 +138,10 @@ local function read_api()
     function api.release_reload(force)
         if release_at and (force or api.now() >= release_at) then
             -- Always release our key, even if focus has left the game.
-            if key_event(true) then release_at = nil; return true end
+            if key_event(true) then
+                release_at, released_tick = nil, state.ticks
+                return true
+            end
             return false
         end
         return true
@@ -147,6 +149,15 @@ local function read_api()
     function api.send_reload()
         if not api.game_focused() then return false, 'game_not_focused' end
         if release_at then return false, 'key_release_pending' end
+        if released_tick == state.ticks then return false, 'keyup_frame_pending' end
+        -- A previous script can leave an injected R down across a reload.
+        -- Always establish a released frame before a fresh automatic press.
+        if bit.band(api.key_state(0x52), 0x8000) ~= 0 then
+            if not key_event(true) then return false, 'stale_keyup_rejected' end
+            released_tick = state.ticks
+            -- Let the game observe keyup before retrying keydown next frame.
+            return false, 'stale_key_released_retry_next_frame'
+        end
         if not key_event(false) then return false, 'keydown_rejected' end
         release_at = api.now() + 0.08
         return true, 'keydown_accepted_release_after_80ms_not_reload_confirmation'
@@ -628,6 +639,7 @@ local function rounds_empty(row)
 end
 
 local function reset_tactical_clicks()
+    state.tactical_window_since = nil
     state.tactical_last_click_at = nil
     state.tactical_seen_click_at = nil
     state.tactical_click_tier = nil
@@ -638,6 +650,7 @@ end
 local function track_tactical_click()
     local click = state.last_lmb_press_at
     if not click or click == state.tactical_seen_click_at or
+        not state.tactical_window_since or click < state.tactical_window_since or
         state.elapsed - click > 0.25 then return end
     local previous = state.tactical_last_click_at
     if previous and click >= previous and
@@ -654,7 +667,7 @@ end
 
 local function tactical_click_wait_finished()
     local last_click = state.tactical_last_click_at
-    local since = last_click or state.empty_since
+    local since = last_click or state.tactical_window_since
     local delay = TACTICAL_CLICK_DELAYS[state.tactical_click_tier or 1]
     return since and state.elapsed - since >= delay
 end
@@ -674,22 +687,19 @@ local function reload_request(reason, expected_tactical_count)
         state.ticks, state.elapsed, reason,
         tostring(state.latest_row and state.latest_row.current_weapon_resource)))
     if state.attempted and reason ~= 'empty_attack' and reason ~= 'tactical_idle' and
-        reason ~= 'tactical_last_round' then
+        reason ~= 'tactical_last_round' and reason ~= 'tactical_zero' and reason ~= 'tactical_immediate' then
         debug_emit('DEBUG_RELOAD_SKIP reason=already_attempted')
         return
     end
-    local minimum_interval = reason == 'tactical_last_round' and 0 or
-        reason == 'tactical_idle' and CONTINUOUS_RELOAD_INTERVAL_SECONDS or 2
+    local immediate = reason == 'tactical_last_round' or reason == 'tactical_zero' or
+        reason == 'tactical_immediate' or reason == 'empty_immediate'
+    local minimum_interval = immediate and 0 or CONTINUOUS_RELOAD_INTERVAL_SECONDS
     if state.last_request and state.elapsed - state.last_request < minimum_interval then
         debug_emit('DEBUG_RELOAD_SKIP reason=rate_limited')
         return
     end
     if not state.latest_row or unsafe_resources[state.latest_row.current_weapon_resource] then
         debug_emit('DEBUG_RELOAD_SKIP reason=missing_or_unsafe_context')
-        return
-    end
-    if state.keys and state.keys.R then
-        debug_emit('DEBUG_RELOAD_SKIP reason=manual_r')
         return
     end
     -- Refresh selection and ammo immediately before sending input.
@@ -704,11 +714,10 @@ local function reload_request(reason, expected_tactical_count)
         return
     end
     if expected_tactical_count and
-        tactical_ammo_count(fresh, tactical_rule(fresh)) ~= expected_tactical_count then
+        (tactical_ammo_count(fresh, tactical_rule(fresh)) or math.huge) > expected_tactical_count then
         debug_emit('DEBUG_RELOAD_SKIP reason=last_round_changed')
         return
     end
-    state.last_request = state.elapsed
     debug_emit(string.format('DEBUG_RELOAD_SEND_BEGIN tick=%d elapsed=%.3f',
         state.ticks, state.elapsed))
     local ok, detail = api.send_reload()
@@ -720,7 +729,10 @@ local function reload_request(reason, expected_tactical_count)
         tostring(state.latest_row.current_weapon_resource),
         tostring(state.latest_row.magazine_count or state.latest_row.rounds_magazine_count),
         tostring(state.latest_row.magazine_chamber_token or state.latest_row.rounds_chamber_token)))
-    if ok then state.attempted = true; state.request_at = state.elapsed end
+    if ok then
+        state.last_request = state.elapsed
+        state.attempted = true; state.request_at = state.elapsed
+    end
     return ok
 end
 
@@ -733,8 +745,8 @@ local function auto_reload_step()
         unsafe_resources[row.current_weapon_resource] or not api.game_focused() then
         state.identity, state.empty_since, state.attempted = nil, nil, false
         state.lmb_edge_time, state.request_at = nil, nil
-        state.manual_reload_episode = nil
         state.critical_one_requested = false
+        state.critical_zero_requested = false
         reset_tactical_clicks()
         return
     end
@@ -742,30 +754,31 @@ local function auto_reload_step()
         ':' .. tostring(row.selected_slot) .. ':' .. tostring(row._weapon_bytes) .. ':' .. tostring(row.local_entity_id)
     if identity ~= state.identity then
         state.identity, state.empty_since, state.attempted = identity, nil, false
-        state.request_at = nil
-        state.manual_reload_episode = nil
+        state.request_at, state.last_request = nil, nil
+        state.immediate_count = nil
         state.critical_one_requested = false
+        state.critical_zero_requested = false
         reset_tactical_clicks()
         emit('WEAPON_CONTEXT resource=' .. tostring(row.current_weapon_resource) ..
             ' entity=' .. tostring(row.selected_entity_id) .. ' policy=' .. row.ammo_path)
     end
-    if ENABLE_TACTICAL_RELOAD then track_tactical_click() end
     local rule = tactical_rule(row)
     local count = tactical_ammo_count(row, rule)
+    if rule and not rule.immediate and count and count <= rule.limit and
+        not attack_only_resources[row.current_weapon_resource] then
+        state.tactical_window_since = state.tactical_window_since or state.elapsed
+        track_tactical_click()
+    else
+        -- Refills and leaving the threshold discard the previous click tier.
+        -- A click before entry must not shorten or lengthen the new wait.
+        reset_tactical_clicks()
+    end
+    if not rounds_empty(row) then state.immediate_count = nil end
     if count ~= 1 then state.critical_one_requested = false end
+    if not rule or rule.limit ~= 0 or count ~= 0 then
+        state.critical_zero_requested = false
+    end
     if rounds_empty(row) then
-        local own_reload_visible = (api.own_reload_active and api.own_reload_active()) or
-            (state.last_request and state.elapsed - state.last_request < 0.15)
-        if state.keys and state.keys.R and not own_reload_visible then
-            -- The user has already requested replacement for this episode.
-            -- Do not duplicate their request as soon as they release the key.
-            state.empty_since = state.elapsed
-            state.attempted = true
-            state.last_request = state.elapsed
-            state.manual_reload_episode = true
-            state.lmb_edge_time, state.request_at = nil, nil
-            return
-        end
         if not state.empty_since then
             state.empty_since = state.elapsed
             emit('EMPTY_BEGIN tick=' .. state.ticks .. ' elapsed=' .. string.format('%.3f', state.elapsed) ..
@@ -778,11 +791,33 @@ local function auto_reload_step()
             state.request_at = nil
         end
         local attack_only = attack_only_resources[row.current_weapon_resource] == true
+        if not attack_only and rule and rule.immediate and count then
+            local fresh_attack = state.last_lmb_press_at and state.last_request and
+                state.last_lmb_press_at > state.last_request
+            if (state.immediate_count == nil or count < state.immediate_count or fresh_attack) and
+                not (api.own_reload_active and api.own_reload_active()) then
+                if reload_request('tactical_immediate', count) then state.immediate_count = count end
+            end
+            return
+        end
+        if not attack_only and rule and rule.limit == 0 and count == 0 then
+            -- Zero-limit rules request immediately. A later attack press can
+            -- retry when the game did not load, without repeating each frame.
+            local fresh_attack = state.last_lmb_press_at and state.last_request and
+                state.last_lmb_press_at > state.last_request
+            if (not state.critical_zero_requested or fresh_attack) and
+                not (api.own_reload_active and api.own_reload_active()) then
+                if reload_request('tactical_zero', 0) then
+                    state.critical_zero_requested = true
+                end
+            end
+            return
+        end
         if not attack_only and count == 1 then
             -- Give the final round priority over attack and idle timers. An
             -- accepted R is enough for this one-round episode; a failed press
             -- can be retried after our previous key has been released.
-            if not state.manual_reload_episode and not state.critical_one_requested and
+            if not state.critical_one_requested and
                 not (api.own_reload_active and api.own_reload_active()) then
                 if reload_request('tactical_last_round', 1) then
                     state.critical_one_requested = true
@@ -793,7 +828,7 @@ local function auto_reload_step()
         if not attack_only and count and count > 1 and count <= rule.limit then
             -- A new shot restarts the wait. Magazine weapons request once per
             -- click interval; per-round weapons continue in continuous_reload_step.
-            if not state.manual_reload_episode and tactical_click_wait_finished() and
+            if tactical_click_wait_finished() and
                 not rule.continuous and
                 state.tactical_sent_generation ~= (state.tactical_click_generation or 0) then
                 if reload_request('tactical_idle') then
@@ -802,21 +837,11 @@ local function auto_reload_step()
             end
             return
         end
-        if row.ammo_path == 'weapon_heat' and not attack_only and
-            state.elapsed - state.empty_since < RELOAD_DELAY_SECONDS then
-            -- Heat always waits a full second, including held fire/attack edges.
-            return
-        end
         if state.lmb_edge_time and state.elapsed - state.lmb_edge_time <= 0.25 and
             state.lmb_edge_time >= state.empty_since then
-            state.lmb_edge_time = nil
-            reload_request('empty_attack')
-        elseif not attack_only and not state.attempted and state.keys and state.keys.LMB and
-            state.elapsed - state.empty_since >= 0.15 then
-            reload_request('empty_attack_held')
-        elseif not attack_only and not state.attempted and
-            state.elapsed - state.empty_since >= RELOAD_DELAY_SECONDS then
-            reload_request('empty_1_second')
+            if reload_request('empty_attack') then state.lmb_edge_time = nil end
+        elseif not attack_only and not state.attempted then
+            reload_request('empty_immediate')
         end
     else
         if state.request_at and row.ammo_path == 'weapon_heat' and row.heat_verified and not row.heat_overheated then
@@ -835,7 +860,6 @@ local function auto_reload_step()
                 ' chamber=' .. tostring(row.magazine_chamber_token or row.rounds_chamber_token))
         end
         state.empty_since, state.attempted = nil, false
-        state.manual_reload_episode = nil
         state.tactical_sent_generation = nil
         if state.lmb_edge_time and state.elapsed - state.lmb_edge_time > 0.75 then
             state.lmb_edge_time = nil
@@ -858,15 +882,14 @@ local function continuous_reload_step()
         return
     end
     if count == 1 then return end
-    if count and count > 1 and not tactical_click_wait_finished() then return end
+    if count and count > 1 and not rule.immediate and not tactical_click_wait_finished() then return end
     local identity = tostring(row.current_weapon_resource) .. ':' .. tostring(row.selected_entity_id) ..
         ':' .. tostring(row.selected_slot) .. ':' .. tostring(row._weapon_bytes) .. ':' .. tostring(row.local_entity_id)
     if identity ~= state.continuous_identity then
         state.continuous_identity = identity
         state.continuous_probe_at = nil
     end
-    if state.manual_reload_episode or
-        (state.last_request and state.elapsed - state.last_request < CONTINUOUS_RELOAD_INTERVAL_SECONDS) or
+    if (state.last_request and state.elapsed - state.last_request < CONTINUOUS_RELOAD_INTERVAL_SECONDS) or
         (state.continuous_probe_at and state.elapsed - state.continuous_probe_at < CONTINUOUS_RELOAD_INTERVAL_SECONDS) then
         return
     end
@@ -878,7 +901,6 @@ local function continuous_reload_step()
         debug_emit('DEBUG_CONTINUOUS_SKIP reason=fresh_context_rejected')
         return
     end
-    state.last_request = state.elapsed
     debug_emit(string.format('DEBUG_CONTINUOUS_SEND_BEGIN tick=%d elapsed=%.3f',
         state.ticks, state.elapsed))
     local ok, detail = api.send_reload()
@@ -889,12 +911,15 @@ local function continuous_reload_step()
         state.ticks, state.elapsed, tostring(ok), tostring(detail),
         tostring(row.current_weapon_resource), tostring(row.rounds_magazine_count),
         tostring(row.rounds_chamber_token)))
-    if ok then state.attempted = true; state.request_at = state.elapsed end
+    if ok then
+        state.last_request = state.elapsed
+        state.attempted = true; state.request_at = state.elapsed
+    end
 end
 
 emit('START revision=' .. state.revision .. ' debug=' .. tostring(DEBUG) ..
     ' tactical_reload=' .. tostring(ENABLE_TACTICAL_RELOAD) ..
-    ' reload_delay=1 heat_overheat_reload=true rounds_and_magazine=true no_native_calls=true no_memory_writes=true input_injection=true')
+    ' reload_delay=0 heat_overheat_reload=true rounds_and_magazine=true no_native_calls=true no_memory_writes=true input_injection=true')
 snapshot('initial')
 
 local original_update = rawget(_G, 'update')
@@ -903,14 +928,14 @@ local function update(dt, ...)
     if setup_ok then
         state.started_at = state.started_at or api.now()
         state.elapsed = api.now() - state.started_at
-        api.release_reload(not api.game_focused())
         input_probe()
+        api.release_reload(not api.game_focused())
         if DEBUG and state.empty_since and state.lmb_edge_time and
             state.elapsed - state.lmb_edge_time <= 0.25 then
             debug_emit(string.format('DEBUG_EMPTY_ATTACK_FRAME tick=%d elapsed=%.3f',
                 state.ticks, state.elapsed))
         end
-        if not state.last_snapshot or state.elapsed - state.last_snapshot >= 0.05 then
+        if api.game_focused() or not state.last_snapshot or state.elapsed - state.last_snapshot >= 0.05 then
             state.last_snapshot = state.elapsed
             snapshot('periodic')
         end
