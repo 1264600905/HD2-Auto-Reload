@@ -11,7 +11,7 @@ local CONTINUOUS_RELOAD_INTERVAL_SECONDS = 0.1
 local TACTICAL_RAPID_CLICK_WINDOW_SECONDS = 0.5
 local TACTICAL_CLICK_DELAYS = {0.1, 0.2, 0.4, 0.6}
 -- RELOAD_CONFIG_INSERT
-local state = {revision = DEBUG and 'auto-reload-configurable-immediate-v4-25327279-debug' or 'auto-reload-configurable-immediate-v4-25327279',
+local state = {revision = DEBUG and 'auto-reload-0.6.0-debug' or 'auto-reload-0.6.0',
     ticks = 0, elapsed = 0, snapshots = 0,
     latest_row = nil,
     lmb_edge_time = nil, empty_since = nil, attempted = false, identity = nil,

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.0
+
+- Publish configurable tactical thresholds, immediate empty reloads, window-scoped click delays, and manual suppression removal.
+- Ship ordinary, tactical, and matching diagnostic packages with versioned names and runtime revision 0.6.0.
+- See [release notes](docs/RELEASE_0.6.0.md) for installation, validation, and known limitations.
+
 ## manual suppression removal (local v4)
 
 - Remove all manual R suppression of automatic reload requests, including the episode latch that blocked M-105 after manual input and further firing to empty.
