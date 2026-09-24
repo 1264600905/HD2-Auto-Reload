@@ -2,6 +2,14 @@
 
 ## 0.5.1
 
+### Unreleased fork changes
+
+- Add weapon-specific reload rules for the APW-1 Anti-Materiel Rifle, R-36
+  Eruptor, SG-97 Sweeper, and GL-15 Evictor.
+- Reload the Anti-Materiel Rifle at one magazine round, the Eruptor at zero
+  magazine rounds, and the Sweeper/Evictor at 4/2 displayed rounds.
+- Check the two displayed-ammo weapons every 100 milliseconds.
+
 - Declare `GetAsyncKeyState` once during API initialization and reuse its binding in the per-frame input probe.
 - Add a `--debug` package with focused context, reload decision and `SendInput` boundary logging.
 

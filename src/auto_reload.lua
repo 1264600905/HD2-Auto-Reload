@@ -15,6 +15,20 @@ local state = {revision = DEBUG and 'auto-reload-0.5.1-debug' or 'auto-reload-0.
 -- Reported by the tester as crash-prone while being equipped. Keep it out of
 -- all manager/state probing until its native layout is independently verified.
 local unsafe_resources = {['11c27d3babb38956'] = 'user_reported_crash'}
+local AMR_RESOURCE = '89c5493e08ca4207'
+local ERUPTOR_RESOURCE = 'b6aff2195568767f'
+local SWEEPER_RESOURCE = 'dcd1c835407ef7ba'
+local EVICTOR_RESOURCE = '006e44327bb953fe'
+local one_remainder_reload_resources = {
+    [AMR_RESOURCE] = true,
+}
+local zero_magazine_reload_resources = {
+    [ERUPTOR_RESOURCE] = true,
+}
+local display_ammo_thresholds = {
+    [SWEEPER_RESOURCE] = 4,
+    [EVICTOR_RESOURCE] = 2,
+}
 rawset(_G, 'LiuAutoReloadRounds', state)
 
 local logger = rawget(_G, 'CowboyBingusModLoader')
@@ -564,8 +578,14 @@ local function rounds_empty(row)
     if not row or row.context_status ~= 'context_observed' or
         row.current_weapon_resource == 'UNKNOWN' then return false end
     if row.ammo_path == 'weapon_magazine' then
-        return row.magazine_verified == true and row.magazine_count == 0 and
-            row.magazine_chamber_token == 0
+        if row.magazine_verified ~= true then return false end
+        if one_remainder_reload_resources[row.current_weapon_resource] then
+            return row.magazine_count == 1
+        end
+        if zero_magazine_reload_resources[row.current_weapon_resource] then
+            return row.magazine_count == 0
+        end
+        return row.magazine_count == 0 and row.magazine_chamber_token == 0
     end
     if row.ammo_path == 'weapon_heat' then
         return row.heat_verified == true and row.heat_requires_replacement == true and
@@ -573,6 +593,12 @@ local function rounds_empty(row)
     end
     if row.ammo_path ~= 'weapon_rounds' then return false end
     if type(row.rounds_chambered) ~= 'boolean' then return false end
+    local display_ammo_threshold = display_ammo_thresholds[row.current_weapon_resource]
+    if display_ammo_threshold then
+        local display_ammo = row.rounds_magazine_count +
+            (row.rounds_chamber_token ~= 0 and 1 or 0)
+        return display_ammo <= display_ammo_threshold
+    end
     if row.rounds_chambered then
         return row.rounds_magazine_count == 0 and
             (row.rounds_chamber_token == 0 or row.rounds_chamber_blocked == true)
@@ -709,6 +735,32 @@ local function auto_reload_step()
     end
 end
 
+local function periodic_reload_step()
+    local row = state.latest_row
+    if not row or row.context_status ~= 'context_observed' or
+        row.weapon_owned ~= true or
+        not display_ammo_thresholds[row.current_weapon_resource] then return end
+    if not state.periodic_reload_at or
+        state.elapsed - state.periodic_reload_at >= 0.1 then
+        local ok_read, fresh = pcall(context_reader, api, game)
+        if ok_read and rounds_empty(fresh) and fresh.weapon_owned == true and
+            fresh.context_status == 'context_observed' and
+            fresh.current_weapon_resource == row.current_weapon_resource and
+            fresh.selected_entity_id == row.selected_entity_id and
+            fresh.selected_slot == row.selected_slot and
+            fresh._weapon_bytes == row._weapon_bytes and
+            fresh.local_entity_id == row.local_entity_id then
+            local ok = api.send_reload()
+            if ok then
+                state.periodic_reload_at = state.elapsed
+                state.attempted = true
+                state.last_request = state.elapsed
+                state.request_at = state.elapsed
+            end
+        end
+    end
+end
+
 emit('START revision=' .. state.revision .. ' debug=' .. tostring(DEBUG) .. ' reload_delay=1 heat_overheat_reload=true rounds_and_magazine=true no_native_calls=true no_memory_writes=true input_injection=true')
 snapshot('initial')
 
@@ -729,6 +781,7 @@ local function update(dt, ...)
             state.last_snapshot = state.elapsed
             snapshot('periodic')
         end
+        periodic_reload_step()
         local trace_step = DEBUG and state.empty_since and state.lmb_edge_time and
             state.elapsed - state.lmb_edge_time <= 0.25
         if trace_step then
