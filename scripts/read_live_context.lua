@@ -1,6 +1,6 @@
 -- Read the actual addon context through a READ-ONLY external process handle.
 -- Never loads the addon entry point, installs callbacks, or sends input.
--- Usage: luajit scripts/read_live_context.lua PID GAME_BASE [samples]
+-- Usage: luajit scripts/read_live_context.lua PID GAME_BASE [samples] [entry.lua]
 local ffi = require('ffi')
 ffi.cdef[[
 void *OpenProcess(uint32_t, int, uint32_t);
@@ -32,10 +32,12 @@ end
 local function readfile(path)
     local file=assert(io.open(path,'rb'));local value=file:read('*a');file:close();return value
 end
-local source = readfile('build/auto_reload_entry.lua')
+local source = readfile(arg[4] or 'build/auto_reload_entry.lua')
 local reader_code = assert(source:match('(local bit =.-)\nlocal api, game'))
 local maps = assert(source:match('(%-%- Embedded by scripts/build.py.-)\nlocal function snapshot'))
-local factory = assert(loadstring(reader_code .. '\n' .. maps .. '\nreturn context_reader, verify_layout, verify_build'))
+local native = source:find('local NATIVE_RELOAD = true -- NATIVE_RELOAD_FLAG', 1, true) ~= nil
+local factory = assert(loadstring('local NATIVE_RELOAD = ' .. tostring(native) .. '\n' ..
+    reader_code .. '\n' .. maps .. '\nreturn context_reader, verify_layout, verify_build'))
 setfenv(factory, setmetatable({unsafe_resources={['11c27d3babb38956']=true}, emit=print}, {__index=_G}))
 local reader, verify_layout, verify_build = factory()
 local ok, why = pcall(function()
@@ -49,7 +51,8 @@ local ok, why = pcall(function()
             local fields={}
             for _,name in ipairs({'context_status','selected_slot','selected_entity_id','current_weapon_resource',
                 'ammo_path','ammo_status','heat_verified','heat_overheated','heat_requires_replacement',
-                'heat_spares','heat_value_bits','heat_config_source','magazine_count','rounds_magazine_count','memory_reads','memory_bytes'}) do
+                'heat_spares','heat_value_bits','heat_config_source','magazine_count','rounds_magazine_count',
+                'native_reload_available','reload_ability_id','native_action_active','memory_reads','memory_bytes'}) do
                 fields[#fields+1]=name..'='..tostring(row[name])
             end
             print(table.concat(fields,' '))

@@ -26,7 +26,7 @@ for o=0,#heat-16,16 do
         key=k;local n=ffi.new('uint32_t[1]');ffi.copy(n,heat:sub(o+9,o+12),4);index=tonumber(n[0]);break
     end
 end
-local function fixture()
+local function fixture(native_enabled, native_component, ability_id)
     local bytes,guards={},{}
     local function put(a,s) for i=1,#s do bytes[a+i-1]=s:byte(i) end end
     local function read(a,n)
@@ -63,9 +63,30 @@ local function fixture()
     put(hm+0x58,ptr(0x520000));put(0x520018,word(2)..word(0)..'\1\0\0\0')
     put(owner+0xf12cc8,ptr(0x600000));put(0x600000,heat)
     local cfg=0x600000+#heat+index*0x250;put(cfg,string.rep('\0',0x250));put(cfg+0x50,'\1');put(cfg+0x90,'\1')
+    if native_enabled then
+        local reload_manager,ability_manager,table_address=0x700000,0x710000,0x730000
+        put(game+0x3326a70,ptr(reload_manager));put(game+0x3326640,ptr(ability_manager))
+        map(reload_manager+0x20,native_component and 42 or nil,native_component and 2 or nil)
+        if native_component then
+            put(reload_manager+0x38,ptr(0x720000));put(0x720010,ptr(owner+0xf32f18+48))
+            map(reload_manager+0x60,nil,nil)
+            put(owner+0xf12800,ptr(table_address))
+            put(table_address,string.rep('\0',498*16+80))
+            local low,high=ffi.new('uint32_t[1]'),ffi.new('uint32_t[1]')
+            ffi.copy(low,key:sub(1,4),4);ffi.copy(high,key:sub(5,8),4)
+            local slot=((tonumber(high[0])%498)*(4294967296%498)+tonumber(low[0])%498)%498
+            put(table_address+slot*16,key..word(0)..word(0))
+            put(table_address+498*16+4,word(ability_id or 2769))
+            map(ability_manager+0x18,42,3)
+            put(ability_manager+0x30,ptr(0x740000));put(0x740018,ptr(owner+0xf32f18+48))
+            put(ability_manager+0x38,ptr(0x750000))
+            put(0x750000+3*0xe0,word(2667)..string.rep('\0',28))
+        end
+    end
     put(game+0x764efa,unhex('4c8b15471ebc02'));put(game+0x764f79,unhex('8bc8498b4258488d1449807c9008000f94c0'))
     local factory=assert(loadstring(code..'\n'..maps..'\nreturn context_reader'))
-    setfenv(factory,setmetatable({unsafe_resources={},emit=function()end},{__index=_G}))
+    setfenv(factory,setmetatable({unsafe_resources={},emit=function()end,
+        NATIVE_RELOAD=native_enabled},{__index=_G}))
     local reader=factory()
     return {put=put,read=read,api={read=read,pointer=pointer},
         run=function(api)return reader(api or {read=read,pointer=pointer},game)end,
@@ -75,6 +96,16 @@ local s=fixture();local row=assert(s.run())
 assert(row.context_status=='context_observed' and row.heat_verified and row.heat_overheated and row.heat_requires_replacement)
 assert(row.selected_slot==1 and row.selected_entity_id==42 and row.memory_bytes<32768)
 print('PASS full local player -> avatar -> inventory -> driver -> heat chain')
+s=fixture(true,true);row=assert(s.run())
+assert(row.context_status=='context_observed' and row.native_reload_available and
+    row.reload_ability_id==2769 and row.native_action_active==false)
+s=fixture(true,true,3123);row=assert(s.run())
+assert(row.context_status=='context_observed' and row.native_reload_available and row.reload_ability_id==3123)
+s=fixture(true,true,0);row=assert(s.run())
+assert(row.context_status=='context_observed' and not row.native_reload_available)
+s=fixture(true,false);row=assert(s.run())
+assert(row.context_status=='context_observed' and not row.native_reload_available and row.heat_verified)
+print('PASS native Reload identity, config, ability and missing-component fallback')
 s.put(0x320000+4,word(42));s.put(0x32001c,word(2));assert(s.run().selected_slot==2)
 s.put(0x320000+8,word(42));s.put(0x32001c,word(3));assert(s.run().selected_slot==3)
 print('PASS heat chain for main, secondary and support slots')

@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import re
+import subprocess
 import sys
 import unittest
 
@@ -57,6 +58,17 @@ class ReloadConfigTests(unittest.TestCase):
             with self.subTest(invalid=invalid != self.config):
                 with self.assertRaises(ValueError):
                     validate_reload_config(invalid)
+
+    def test_native_build_requires_verified_game(self):
+        for arguments, expected in (
+            (['--native-reload'], 'requires --game-dir'),
+            (['--native-reload', '--enable-tactical-reload'], 'requires --game-dir'),
+        ):
+            with self.subTest(arguments=arguments):
+                result = subprocess.run([sys.executable, str(ROOT / 'scripts/build.py'),
+                                         *arguments], cwd=ROOT, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(expected, result.stderr)
 
 
 if __name__ == '__main__':

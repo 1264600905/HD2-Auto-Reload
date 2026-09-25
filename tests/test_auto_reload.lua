@@ -7,19 +7,21 @@ local input_code = assert(source:match('(local function input_probe%(%).-)\nloca
 local controller = assert(generated:match('(local function truly_empty.-)\nemit%(%\'START'))
 local policies = assert(generated:match('(local CONTINUOUS_RELOAD_INTERVAL_SECONDS =.-)\nlocal state ='))
 local tests = 0
-local function scenario(tactical_enabled)
+local function scenario(tactical_enabled, native_enabled)
     local row = {context_status='context_observed', ammo_path='weapon_rounds',
         current_weapon_resource='safe', selected_entity_id=1, weapon_owned=true,
-        rounds_magazine_count=0, rounds_chambered=false}
-    local state = {elapsed=0, ticks=0, latest_row=row, latest_at=0, keys={}}
+        rounds_magazine_count=0, rounds_chambered=false,
+        native_reload_available=native_enabled, native_action_active=false}
+    local state = {elapsed=0, ticks=0, latest_row=row, latest_at=0, keys={}, native_requests={}}
     local sent, logs, fresh, focused, own_down = 0, {}, row, true, false
     local raw_keys = {}
     local send_ok = true
     local api = {key_state=function(code) return raw_keys[code] or 0 end, game_focused=function() return focused end,
         own_reload_active=function() return own_down end,
-        send_reload=function()
+        send_reload=function(observed)
             if not send_ok then return false,'keyup_frame_pending' end
-            sent=sent+1; return true,'test'
+            assert(observed == fresh)
+            sent=sent+1; return true,'test',native_enabled and observed.native_reload_available and 'native' or nil
         end}
     local selected_policies = policies
     if tactical_enabled then
@@ -32,6 +34,7 @@ local function scenario(tactical_enabled)
         '\n' .. input_code .. '\nreturn auto_reload_step, rounds_empty, continuous_reload_step, input_probe'))
     setfenv(factory, setmetatable({RELOAD_DELAY_SECONDS=1, state=state, api=api,
         bit=require('bit'), unsafe_resources={unsafe=true},
+        NATIVE_RELOAD=native_enabled,
         context_reader=function() return fresh end,
         emit=function(s) logs[#logs+1]=s end, debug_emit=function() end,
         scalar=tostring}, {__index=_G}))
@@ -51,6 +54,105 @@ end
 test('empty reload sends immediately and only once', function()
     local s=scenario(); s.step(0); assert(s.sent()==1); s.step(.99); assert(s.sent()==1)
     s.step(1); s.step(7); assert(s.sent()==1)
+end)
+test('native reload does not reenter during one empty episode', function()
+    local s=scenario(false,true)
+    s.row.current_weapon_resource='006e44327bb953fe'
+    s.row.native_action_active=false
+    s.step(0); assert(s.sent()==1)
+    s.row.native_action_active=true; s.step(.1); assert(s.sent()==1)
+    s.row.native_action_active=false
+    s.click(.2); s.step(.2); assert(s.sent()==1)
+    s.row.rounds_magazine_count=2; s.step(.3)
+    s.row.rounds_magazine_count=0; s.step(.4); assert(s.sent()==2)
+end)
+test('native reload waits for an idle ability', function()
+    local s=scenario(false,true)
+    s.row.current_weapon_resource='006e44327bb953fe'
+    s.row.native_action_active=true
+    s.step(0); assert(s.sent()==0)
+    s.row.native_action_active=false
+    s.step(.1); assert(s.sent()==1)
+end)
+test('native reload lock survives switching away and back', function()
+    local s=scenario(false,true)
+    s.row.current_weapon_resource='006e44327bb953fe'
+    s.row.native_action_active=false
+    s.step(0); assert(s.sent()==1)
+    s.row.current_weapon_resource='other'; s.row.rounds_magazine_count=2; s.step(.1)
+    s.row.current_weapon_resource='006e44327bb953fe'; s.row.rounds_magazine_count=0
+    s.step(.2); assert(s.sent()==1)
+    s.row.rounds_magazine_count=2; s.step(.3)
+    s.row.rounds_magazine_count=0; s.step(.4); assert(s.sent()==2)
+end)
+test('native locks remain separate across two empty weapons', function()
+    local s=scenario(false,true)
+    s.row.current_weapon_resource='006e44327bb953fe'
+    s.step(0); assert(s.sent()==1)
+    local first_identity=s.state.identity
+    s.row.current_weapon_resource='a8cffb316f0b5c5f'
+    s.step(.1); assert(s.sent()==2)
+    assert(s.state.native_requests[first_identity])
+    s.row.current_weapon_resource='006e44327bb953fe'
+    s.step(.2); assert(s.sent()==2)
+end)
+test('native request retries only after timeout and new attack', function()
+    local s=scenario(false,true)
+    s.row.current_weapon_resource='006e44327bb953fe'
+    s.step(0); assert(s.sent()==1)
+    s.click(.1); s.step(.1); assert(s.sent()==1)
+    s.step(8.1); assert(s.sent()==1)
+    s.click(8.2); s.step(8.2); assert(s.sent()==2)
+    s.click(8.3); s.step(8.3); assert(s.sent()==2)
+end)
+test('native reload works for another verified magazine weapon', function()
+    local s=scenario(false,true)
+    s.row.current_weapon_resource='968211c0033dce64'
+    s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
+    s.row.magazine_count=0; s.row.magazine_chamber_token=0
+    s.step(0); assert(s.sent()==1,table.concat(s.logs,'\n'))
+end)
+test('native build falls back to input without a Reload component', function()
+    local s=scenario(false,true)
+    s.row.native_reload_available=false
+    s.step(0); assert(s.sent()==1)
+    assert(next(s.state.native_requests)==nil)
+end)
+test('lost native component does not inject R during pending reload', function()
+    local s=scenario(false,true)
+    s.row.current_weapon_resource='006e44327bb953fe'
+    s.step(0); assert(s.sent()==1)
+    s.row.native_reload_available=false
+    s.click(.2); s.step(.2); assert(s.sent()==1)
+end)
+test('native fault disables subsequent automatic requests', function()
+    local s=scenario(false,true)
+    s.state.native_fault='signature_mismatch'
+    s.step(0); assert(s.sent()==0)
+end)
+test('native tactical GL-15 starts at two total rounds', function()
+    local s=scenario(true,true)
+    s.row.current_weapon_resource='006e44327bb953fe'
+    s.row.rounds_chambered=true; s.row.rounds_chamber_token=297
+    s.row.rounds_magazine_count=2
+    s.continuous_step(0); assert(s.sent()==0)
+    s.row.rounds_magazine_count=1
+    s.continuous_step(.1); assert(s.sent()==0)
+    s.continuous_step(.21); assert(s.sent()==1)
+    assert(s.state.native_requests[s.state.identity].count==2)
+end)
+test('native per-round reload waits for progress and idle action', function()
+    local s=scenario(true,true)
+    s.row.current_weapon_resource='006e44327bb953fe'
+    s.row.rounds_chambered=true; s.row.rounds_chamber_token=0
+    s.step(0); assert(s.sent()==1)
+    s.row.native_action_active=true
+    s.continuous_step(.1); assert(s.sent()==1)
+    s.row.native_action_active=false
+    s.continuous_step(.2); assert(s.sent()==1)
+    s.row.rounds_chamber_token=297
+    s.continuous_step(.3); assert(s.sent()==2)
+    s.continuous_step(.5); assert(s.sent()==2)
 end)
 test('AMR waits for zero magazine rounds', function()
     local s=scenario(true); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true

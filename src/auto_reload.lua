@@ -1,18 +1,21 @@
 -- HD2-Addon: mods/liu/auto_reload_rounds
 
--- Auto Reload for builds 25327279/25480438: read-only ammo state, native R input.
+-- Auto Reload for builds 25327279/25480438: read-only ammo state, native R input by default.
 -- The entity/component layout is adapted from etxp/HD2-C4-Quick-Actions
 -- (MIT); C4-specific action calls and all memory writes are deliberately removed.
 local existing = rawget(_G, 'LiuAutoReloadRounds')
 if existing then return existing end
 
 local DEBUG = false -- DEBUG_BUILD_FLAG
+local NATIVE_RELOAD = false -- NATIVE_RELOAD_FLAG
 local CONTINUOUS_RELOAD_INTERVAL_SECONDS = 0.1
 local TACTICAL_RAPID_CLICK_WINDOW_SECONDS = 0.5
 local TACTICAL_CLICK_DELAYS = {0.1, 0.2, 0.4, 0.6}
 -- RELOAD_CONFIG_INSERT
-local state = {revision = DEBUG and 'auto-reload-0.6.3-debug' or 'auto-reload-0.6.3',
+local state = {revision = 'auto-reload-0.7.0' ..
+    (NATIVE_RELOAD and '-native' or '') .. (DEBUG and '-debug' or ''),
     ticks = 0, elapsed = 0, snapshots = 0,
+    native_requests = {},
     latest_row = nil,
     lmb_edge_time = nil, empty_since = nil, attempted = false, identity = nil,
     critical_one_requested = false, critical_zero_requested = false}
@@ -122,6 +125,30 @@ local function read_api()
         return tonumber(owner[0]) == tonumber(process_id)
     end
     function api.key_state(code) return tonumber(get_async_key_state(code)) end
+    local native_reload, native_game
+    local native_signatures = {
+        {0x774b60, '488bc44488401848894808565741554881ecb00000008b3db8f0d0028bf2'},
+        {0x774be2, '3bc60f85eb030000418b44d004898424d000000083f8ff'},
+        {0x774d10, '498bcce80885d8ff4c8bf0443978040f8498020000'},
+        {0x774edb, 'f3410f1046380f57ff0f2ec77a027428418b4e04'},
+        {0x774f36, '458b460441b901000000488b0df916bb028bd3f30f11742420e8ec5f0500'},
+        {0x7caf40, '4c8bdc49895b18555657415541564881ecb0000000'},
+        {0x4fd220, '4883ec284c8bd14885c9750733c04883c428c3'},
+        {0x4fce20, '4885c97471488b056cf1f602448bc14c8b900028f100'},
+    }
+    local function verify_native_signatures()
+        for _, signature in ipairs(native_signatures) do
+            assert(hex(assert(api.read(native_game + signature[1], #signature[2] / 2),
+                'native_reload_code_unavailable')) == signature[2],
+                string.format('native_reload_code_mismatch_at_%x', signature[1]))
+        end
+    end
+    function api.bind_native_reload(base)
+        assert(NATIVE_RELOAD, 'native_reload_not_enabled')
+        native_game = base
+        verify_native_signatures()
+        native_reload = ffi.cast('void (*)(void *, uint32_t, bool)', base + 0x774b60)
+    end
     local release_at, released_tick
     function api.own_reload_active() return release_at ~= nil end
     local function key_event(up)
@@ -148,8 +175,48 @@ local function read_api()
         end
         return true
     end
-    function api.send_reload()
+    function api.send_reload(row)
         if not api.game_focused() then return false, 'game_not_focused' end
+        if state.native_fault then return false, 'native_reload_fault_latched' end
+        if NATIVE_RELOAD and row and row.native_reload_available then
+            if not native_reload or not row.reload_ability_id or
+                row.native_action_active ~= false or
+                not row._reload_manager or not row._reload_index or not row._ability_manager or
+                not row._ability_index then
+                return false, 'native_reload_context_unverified'
+            end
+            local ok, reason = pcall(function()
+                verify_native_signatures()
+                assert(api.pointer(api.read(native_game + 0x3326a70, 8)) == row._reload_manager,
+                    'native_reload_manager_changed')
+                local registry = assert(api.pointer(api.read(row._reload_manager + 0x38, 8)),
+                    'native_reload_registry_missing')
+                local weapon = assert(api.pointer(api.read(registry + row._reload_index * 8, 8)),
+                    'native_reload_weapon_missing')
+                assert(api.read(weapon, 24) == row._weapon_bytes, 'native_reload_identity_changed')
+                assert(api.pointer(api.read(native_game + 0x3326640, 8)) == row._ability_manager,
+                    'native_ability_manager_changed')
+                local ability_registry = assert(api.pointer(api.read(row._ability_manager + 0x30, 8)),
+                    'native_ability_registry_missing')
+                local ability_weapon = assert(api.pointer(api.read(
+                    ability_registry + row._ability_index * 8, 8)), 'native_ability_weapon_missing')
+                assert(api.read(ability_weapon, 24) == row._weapon_bytes,
+                    'native_ability_identity_changed')
+                local ability_state = assert(api.pointer(api.read(row._ability_manager + 0x38, 8)),
+                    'native_ability_state_missing')
+                assert(api.read(ability_state + row._ability_index * 0xe0 + 16, 1) == '\0',
+                    'native_ability_busy')
+                emit(string.format('NATIVE_RELOAD_CALL_BEGIN tick=%d resource=%s',
+                    state.ticks, row.current_weapon_resource))
+                native_reload(ffi.cast('void *', row._reload_manager), row._weapon_id, false)
+            end)
+            if not ok then
+                state.native_fault = tostring(reason)
+                emit('NATIVE_RELOAD_FAULT error=' .. state.native_fault:gsub('[\r\n]', '_'))
+                return false, state.native_fault
+            end
+            return true, 'native_reload_call_returned_not_reload_confirmation', 'native'
+        end
         if release_at then return false, 'key_release_pending' end
         if released_tick == state.ticks then return false, 'keyup_frame_pending' end
         -- A previous script can leave an injected R down across a reload.
@@ -334,6 +401,59 @@ local function context_reader(api, game, extend)
     if unsafe_resources[row.current_weapon_resource] then return finish(row, 'unsafe_resource') end
     if not row.weapon_owned then return finish(row, 'weapon_not_owned') end
 
+    if NATIVE_RELOAD then
+        local manager = global(0x3326a70)
+        local index = lookup(manager + 0x20, weapon_id, 65536)
+        if index then
+            assert(index < 4096, 'native_reload_index_invalid')
+            local registry = pointer(manager + 0x38, true)
+            assert(read(pointer(registry + index * 8, true), 24, true) == weapon,
+                'native_reload_component_identity_mismatch')
+            local override = lookup(manager + 0x60, weapon_id, 65536)
+            local config
+            if override then
+                assert(override < 4096, 'native_reload_override_index_invalid')
+                config = read(pointer(manager + 0xa0, true) + override * 80, 80, true)
+            else
+                local table_address = pointer(owner + 0xf12800, true)
+                local low, high = u32(weapon, 0), u32(weapon, 4)
+                local first_slot = ((high % 498) * (4294967296 % 498) + low % 498) % 498
+                for probe = 0, 497 do
+                    local entry = read(table_address + ((first_slot + probe) % 498) * 16, 16, true)
+                    if resource(entry:sub(1, 8)) == row.current_weapon_resource then
+                        local template_index = u32(entry, 8)
+                        assert(template_index < 498, 'native_reload_template_index_invalid')
+                        config = read(table_address + 498 * 16 + template_index * 80, 80, true)
+                        break
+                    end
+                    if u32(entry, 0) == 0 and u32(entry, 4) == 0 then break end
+                end
+            end
+            if config then
+                local ability_id = u32(config, 4)
+                if ability_id > 0 and ability_id < 100000 then
+                    local ability_manager = global(0x3326640)
+                    local ability_index = lookup(ability_manager + 0x18, weapon_id, 65536)
+                    if ability_index then
+                        assert(ability_index < 4096, 'native_ability_index_invalid')
+                        local ability_registry = pointer(ability_manager + 0x30, true)
+                        assert(read(pointer(ability_registry + ability_index * 8, true), 24, true) == weapon,
+                            'native_ability_component_identity_mismatch')
+                        local ability_state = read(pointer(ability_manager + 0x38, true) +
+                            ability_index * 0xe0, 32, true)
+                        assert(ability_state:byte(17) <= 1, 'native_ability_active_flag_invalid')
+                        row.native_action_active = ability_state:byte(17) == 1
+                        row.native_active_ability_id = u32(ability_state, 0)
+                        row.reload_ability_id = ability_id
+                        row.native_reload_available = true
+                        row._reload_manager, row._reload_index = manager, index
+                        row._ability_manager, row._ability_index = ability_manager, ability_index
+                    end
+                end
+            end
+        end
+    end
+
     local weapon_manager = global(0x3326660)
     local weapon_component = lookup(weapon_manager + 0x28, weapon_id, 65536)
     if not weapon_component then return finish(row, 'weapon_driver_missing') end
@@ -417,6 +537,10 @@ local function verify_build(pe)
         (u32(pe, 8) == 0x6aa96b14 and u32(pe, 0x50) == 0x4770000) or
         (u32(pe, 8) == 0x6ab3b43f and u32(pe, 0x50) == 0x4744000)),
         'unsupported_game_build')
+    if NATIVE_RELOAD then
+        assert(u32(pe, 8) == 0x6ab3b43f and u32(pe, 0x50) == 0x4744000,
+            'unsupported_native_reload_build')
+    end
 end
 
 local function verify_layout(api, game)
@@ -452,7 +576,9 @@ local setup_ok, setup_error = pcall(function()
     local pe = assert(api.read(game + pe_offset, 0x60), 'module_pe_unavailable')
     verify_build(pe)
     verify_layout(api, game)
-    emit(string.format('SETUP game_base=0x%X read_only=true build=25327279', game))
+    if NATIVE_RELOAD then api.bind_native_reload(game) end
+    emit(string.format('SETUP game_base=0x%X read_only=true build=%s', game,
+        NATIVE_RELOAD and '25480438' or '25327279_or_25480438'))
     -- One known ammo query, identified by the reference project's native
     -- analysis. Capture for offline disassembly only; never execute these bytes.
     local query = api.read(game + 0x744c20, 0x660)
@@ -501,6 +627,9 @@ local function log_row(row, error_message, phase)
         'resource_count=' .. scalar(row.resource_count),
         'counter_semantics=' .. scalar(row.ammo_counter_semantics),
         'config_source=' .. scalar(row.rounds_config_source),
+        'native_reload=' .. scalar(row.native_reload_available),
+        'reload_ability=' .. scalar(row.reload_ability_id),
+        'native_action_active=' .. scalar(row.native_action_active),
         'data_status=' .. scalar(row.weapon_data_status),
         'function_types=' .. scalar(row.weapon_function_types),
         'weapon_state_flags=' .. scalar(row.weapon_state_flags),
@@ -685,9 +814,16 @@ local function fresh_context_matches(row, fresh)
         fresh.selected_entity_id == row.selected_entity_id and
         fresh.selected_slot == row.selected_slot and
         fresh.ammo_path == row.ammo_path and
+        fresh.native_reload_available == row.native_reload_available and
+        fresh.reload_ability_id == row.reload_ability_id and
         fresh._weapon_bytes == row._weapon_bytes and
         fresh.local_entity_id == row.local_entity_id and
         fresh.current_weapon_resource == row.current_weapon_resource
+end
+
+local function native_retry_due(request)
+    return request and request.at and state.elapsed - request.at >= 8 and
+        state.last_lmb_press_at and state.last_lmb_press_at >= request.at + 8
 end
 
 local function reload_request(reason, expected_tactical_count)
@@ -699,6 +835,10 @@ local function reload_request(reason, expected_tactical_count)
         debug_emit('DEBUG_RELOAD_SKIP reason=already_attempted')
         return
     end
+    local native_request = state.native_requests[state.identity]
+    if NATIVE_RELOAD and
+        ((state.latest_row and state.latest_row.native_reload_available and state.attempted) or
+         native_request) and not native_retry_due(native_request) then return end
     local immediate = reason == 'tactical_last_round' or reason == 'tactical_zero' or
         reason == 'tactical_immediate' or reason == 'empty_immediate'
     local minimum_interval = immediate and 0 or CONTINUOUS_RELOAD_INTERVAL_SECONDS
@@ -728,7 +868,7 @@ local function reload_request(reason, expected_tactical_count)
     end
     debug_emit(string.format('DEBUG_RELOAD_SEND_BEGIN tick=%d elapsed=%.3f',
         state.ticks, state.elapsed))
-    local ok, detail = api.send_reload()
+    local ok, detail, backend = api.send_reload(fresh)
     debug_emit(string.format('DEBUG_RELOAD_SEND_END tick=%d elapsed=%.3f ok=%s detail=%s',
         state.ticks, state.elapsed, tostring(ok), tostring(detail)))
     emit(string.format(
@@ -740,6 +880,10 @@ local function reload_request(reason, expected_tactical_count)
     if ok then
         state.last_request = state.elapsed
         state.attempted = true; state.request_at = state.elapsed
+        if backend == 'native' then
+            state.native_requests[state.identity] = {
+                count = tactical_ammo_count(fresh, tactical_rule(fresh)), at = state.elapsed}
+        end
     end
     return ok
 end
@@ -750,7 +894,8 @@ local function auto_reload_step()
         (row.ammo_path ~= 'weapon_rounds' and row.ammo_path ~= 'weapon_magazine' and row.ammo_path ~= 'weapon_heat') or row.weapon_owned ~= true or
         (row.ammo_path == 'weapon_heat' and (row.heat_verified ~= true or row.heat_requires_replacement ~= true)) or
         not state.latest_at or state.elapsed - state.latest_at > 0.25 or
-        unsafe_resources[row.current_weapon_resource] or not api.game_focused() then
+        unsafe_resources[row.current_weapon_resource] or state.native_fault or
+        not api.game_focused() then
         state.identity, state.empty_since, state.attempted = nil, nil, false
         state.lmb_edge_time, state.request_at = nil, nil
         state.critical_one_requested = false
@@ -770,6 +915,7 @@ local function auto_reload_step()
         emit('WEAPON_CONTEXT resource=' .. tostring(row.current_weapon_resource) ..
             ' entity=' .. tostring(row.selected_entity_id) .. ' policy=' .. row.ammo_path)
     end
+    if NATIVE_RELOAD and row.native_reload_available and row.native_action_active ~= false then return end
     local rule = tactical_rule(row)
     local count = tactical_ammo_count(row, rule)
     if rule and not rule.immediate and count and count <= rule.limit and
@@ -852,6 +998,7 @@ local function auto_reload_step()
             reload_request('empty_immediate')
         end
     else
+        if NATIVE_RELOAD then state.native_requests[identity] = nil end
         if state.request_at and row.ammo_path == 'weapon_heat' and row.heat_verified and not row.heat_overheated then
             emit('HEAT_LOCK_CLEARED_AFTER_REQUEST reload_animation_not_verified=true')
             state.request_at = nil
@@ -884,12 +1031,15 @@ local function continuous_reload_step()
         not rule or rule.continuous ~= true or
         not rounds_empty(row) or row.weapon_owned ~= true or
         not state.latest_at or state.elapsed - state.latest_at > 0.25 or
-        unsafe_resources[row.current_weapon_resource] or not api.game_focused() then
+        unsafe_resources[row.current_weapon_resource] or state.native_fault or
+        not api.game_focused() then
         state.continuous_identity = nil
         state.continuous_probe_at = nil
         return
     end
-    if count == 1 then return end
+    local use_native = NATIVE_RELOAD and row.native_reload_available
+    if use_native and row.native_action_active ~= false then return end
+    if count == 1 and not use_native then return end
     if count and count > 1 and not rule.immediate and not tactical_click_wait_finished() then return end
     local identity = tostring(row.current_weapon_resource) .. ':' .. tostring(row.selected_entity_id) ..
         ':' .. tostring(row.selected_slot) .. ':' .. tostring(row._weapon_bytes) .. ':' .. tostring(row.local_entity_id)
@@ -897,6 +1047,11 @@ local function continuous_reload_step()
         state.continuous_identity = identity
         state.continuous_probe_at = nil
     end
+    if NATIVE_RELOAD and not use_native and state.native_requests[identity] and
+        not native_retry_due(state.native_requests[identity]) then return end
+    local native_request = use_native and state.native_requests[identity]
+    if native_request and (not count or not native_request.count or
+        count <= native_request.count) and not native_retry_due(native_request) then return end
     if (state.last_request and state.elapsed - state.last_request < CONTINUOUS_RELOAD_INTERVAL_SECONDS) or
         (state.continuous_probe_at and state.elapsed - state.continuous_probe_at < CONTINUOUS_RELOAD_INTERVAL_SECONDS) then
         return
@@ -909,9 +1064,13 @@ local function continuous_reload_step()
         debug_emit('DEBUG_CONTINUOUS_SKIP reason=fresh_context_rejected')
         return
     end
+    local fresh_count = tactical_ammo_count(fresh, tactical_rule(fresh))
+    if use_native and (fresh.native_action_active ~= false or not fresh_count or
+        (native_request and (not native_request.count or
+         fresh_count <= native_request.count) and not native_retry_due(native_request))) then return end
     debug_emit(string.format('DEBUG_CONTINUOUS_SEND_BEGIN tick=%d elapsed=%.3f',
         state.ticks, state.elapsed))
-    local ok, detail = api.send_reload()
+    local ok, detail, backend = api.send_reload(fresh)
     debug_emit(string.format('DEBUG_CONTINUOUS_SEND_END tick=%d elapsed=%.3f ok=%s detail=%s',
         state.ticks, state.elapsed, tostring(ok), tostring(detail)))
     emit(string.format(
@@ -922,12 +1081,17 @@ local function continuous_reload_step()
     if ok then
         state.last_request = state.elapsed
         state.attempted = true; state.request_at = state.elapsed
+        if backend == 'native' then
+            state.native_requests[identity] = {count = fresh_count, at = state.elapsed}
+        end
     end
 end
 
 emit('START revision=' .. state.revision .. ' debug=' .. tostring(DEBUG) ..
     ' tactical_reload=' .. tostring(ENABLE_TACTICAL_RELOAD) ..
-    ' reload_delay=0 heat_overheat_reload=true rounds_and_magazine=true no_native_calls=true no_memory_writes=true input_injection=true')
+    ' reload_delay=0 heat_overheat_reload=true rounds_and_magazine=true no_native_calls=' ..
+    tostring(not NATIVE_RELOAD) .. ' native_reload_preferred=' .. tostring(NATIVE_RELOAD) ..
+    ' no_direct_memory_writes=true input_injection_fallback=true')
 snapshot('initial')
 
 local original_update = rawget(_G, 'update')

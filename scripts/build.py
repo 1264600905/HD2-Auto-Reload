@@ -9,8 +9,10 @@ from package import build_addon
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / 'src/auto_reload.lua'
 BUILD = ROOT / 'build'
+VERSION = '0.7.0'
 MARKER = '-- STATIC_COMPONENT_READER_INSERT'
 DEBUG_MARKER = 'local DEBUG = false -- DEBUG_BUILD_FLAG'
+NATIVE_MARKER = 'local NATIVE_RELOAD = false -- NATIVE_RELOAD_FLAG'
 CONFIG_MARKER = '-- RELOAD_CONFIG_INSERT'
 MAPS = {
     'MAGAZINE': ROOT / 'data/WeaponMagazineComponent.25327279.map.hex',
@@ -77,7 +79,11 @@ def main():
     parser.add_argument('--debug', action='store_true', help='Build a diagnostic package with reload trace logging')
     parser.add_argument('--enable-tactical-reload', action='store_true',
                         help='启用战术换弹 in the built package; no in-game setting')
+    parser.add_argument('--native-reload', action='store_true',
+                        help='Build the experimental native reload package for build 25480438')
     args = parser.parse_args()
+    if args.native_reload and not args.game_dir:
+        parser.error('Native reload requires --game-dir for SHA256 verification')
     supported_hashes = {
         ('73374bd4e38386beb9a23bef480082b67d457ebc77485fbec5f488b4e95e201f',
          'd8e23968d1412b07e06785321727d63edf74e711214d6f6adeb3bfca95ca6827'),
@@ -97,6 +103,7 @@ def main():
             r'^(local ENABLE_TACTICAL_RELOAD = )(?:true|false)( -- 启用战术换弹)$',
             r'\g<1>true\g<2>', reload_config, count=1, flags=re.M)
     if (source.count(MARKER) != 1 or source.count(DEBUG_MARKER) != 1 or
+            source.count(NATIVE_MARKER) != 1 or
             source.count(CONFIG_MARKER) != 1):
         raise SystemExit('source build marker missing or duplicated')
     insertion = INSERT
@@ -104,17 +111,23 @@ def main():
         insertion = insertion.replace('__' + name + '_MAP__', bytes.fromhex(path.read_text()).hex())
     generated = source.replace(MARKER, insertion).replace(
         CONFIG_MARKER, reload_config).replace(
-        DEBUG_MARKER, 'local DEBUG = ' + str(args.debug).lower() + ' -- DEBUG_BUILD_FLAG')
+        DEBUG_MARKER, 'local DEBUG = ' + str(args.debug).lower() + ' -- DEBUG_BUILD_FLAG').replace(
+        NATIVE_MARKER, 'local NATIVE_RELOAD = ' + str(args.native_reload).lower() +
+        ' -- NATIVE_RELOAD_FLAG')
     BUILD.mkdir(parents=True, exist_ok=True)
-    suffix = ('-tactical' if args.enable_tactical_reload else '') + ('-debug' if args.debug else '')
+    suffix = ('-native' if args.native_reload else '') + (
+        '-tactical' if args.enable_tactical_reload else '') + ('-debug' if args.debug else '')
     entry = BUILD / ('auto_reload_entry' + suffix.replace('-', '_') + '.lua')
     entry.write_text(generated, encoding='utf-8', newline='\n')
-    output = BUILD / ('Auto-Reload-v0.6.3' + suffix + '.zip')
+    version = 'v' + VERSION
+    output = BUILD / ('Auto-Reload-' + version + suffix + '.zip')
     build_addon('mods/liu/auto_reload_rounds', generated.encode('utf-8'),
                 '4df5aee3-3c5d-47fc-b0e9-0a40f7988738', output,
-                'Auto Reload v0.6.3' + (' tactical' if args.enable_tactical_reload else '') +
+                'Auto Reload ' + version + (' tactical' if args.enable_tactical_reload else '') +
+                (' native reload' if args.native_reload else '') +
                 (' Debug' if args.debug else '') +
-                ' (immediate; Heat; builds 25327279/25480438)')
+                (' (native preferred; build 25480438; experimental)' if args.native_reload
+                 else ' (immediate; Heat; builds 25327279/25480438)'))
     print('Built', output)
 
 if __name__ == '__main__':
