@@ -1,4 +1,4 @@
--- Embedded by scripts/build.py. Build 25327279 only.
+-- Embedded by scripts/build.py. Shared maps for builds 25327279/25480438.
 local static_magazine_map = '__MAGAZINE_MAP__'
 local static_rounds_map = '__ROUNDS_MAP__'
 local static_heat_map = '__HEAT_MAP__'
@@ -36,5 +36,5 @@ magazine_static_records = function(e, row)
 end
 static_component_snapshot = function(row)
     emit('STATIC_COMPONENT resource=' .. tostring(row.current_weapon_resource) ..
-        ' path=' .. tostring(row.ammo_path) .. ' build=25327279')
+        ' path=' .. tostring(row.ammo_path) .. ' map_build=25327279')
 end

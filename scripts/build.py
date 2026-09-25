@@ -78,14 +78,17 @@ def main():
     parser.add_argument('--enable-tactical-reload', action='store_true',
                         help='启用战术换弹 in the built package; no in-game setting')
     args = parser.parse_args()
-    expected_hashes = {
-        'data/game/game.dll': '73374bd4e38386beb9a23bef480082b67d457ebc77485fbec5f488b4e95e201f',
-        'bin/helldivers2.exe': 'd8e23968d1412b07e06785321727d63edf74e711214d6f6adeb3bfca95ca6827'.lower(),
+    supported_hashes = {
+        ('73374bd4e38386beb9a23bef480082b67d457ebc77485fbec5f488b4e95e201f',
+         'd8e23968d1412b07e06785321727d63edf74e711214d6f6adeb3bfca95ca6827'),
+        ('2e2c3b7c2500646dadd5f2b4c6e0504dbb7e7896139f64cddc0d1813c718f51e',
+         'f5fee03dcfdb2e553a4752c283590950ac13316b376d8196aa556ff0400d5f06'),
     }
     if args.game_dir:
-        for relative, expected in expected_hashes.items():
-            if hashlib.sha256((args.game_dir / relative).read_bytes()).hexdigest() != expected:
-                raise SystemExit('Unsupported game binary: ' + relative)
+        actual = tuple(hashlib.sha256((args.game_dir / relative).read_bytes()).hexdigest()
+                       for relative in ('data/game/game.dll', 'bin/helldivers2.exe'))
+        if actual not in supported_hashes:
+            raise SystemExit('Unsupported game binary pair')
     source = SOURCE.read_text(encoding='utf-8')
     reload_config = RELOAD_CONFIG.read_text(encoding='utf-8')
     validate_reload_config(reload_config)
@@ -106,12 +109,12 @@ def main():
     suffix = ('-tactical' if args.enable_tactical_reload else '') + ('-debug' if args.debug else '')
     entry = BUILD / ('auto_reload_entry' + suffix.replace('-', '_') + '.lua')
     entry.write_text(generated, encoding='utf-8', newline='\n')
-    output = BUILD / ('Auto-Reload-v0.6.1' + suffix + '.zip')
+    output = BUILD / ('Auto-Reload-v0.6.3' + suffix + '.zip')
     build_addon('mods/liu/auto_reload_rounds', generated.encode('utf-8'),
                 '4df5aee3-3c5d-47fc-b0e9-0a40f7988738', output,
-                'Auto Reload v0.6.1' + (' tactical' if args.enable_tactical_reload else '') +
+                'Auto Reload v0.6.3' + (' tactical' if args.enable_tactical_reload else '') +
                 (' Debug' if args.debug else '') +
-                ' (immediate; Heat; build 25327279)')
+                ' (immediate; Heat; builds 25327279/25480438)')
     print('Built', output)
 
 if __name__ == '__main__':

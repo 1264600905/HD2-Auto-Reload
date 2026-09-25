@@ -7,6 +7,17 @@ local maps=assert(source:match('(%-%- Embedded by scripts/build.py.-)\nlocal fun
 local function word(n) return ffi.string(ffi.new('uint32_t[1]',n),4) end
 local function ptr(n) return ffi.string(ffi.new('uint64_t[1]',n),8) end
 local function unhex(s) return (s:gsub('%s',''):gsub('..',function(p)return string.char(tonumber(p,16))end)) end
+local verify_build=assert(loadstring(code..'\nreturn verify_build'))()
+local function header(timestamp,size)
+    return 'PE\0\0'..word(0)..word(timestamp)..string.rep('\0',68)..word(size)
+end
+verify_build(header(0x6aa96b14,0x4770000))
+verify_build(header(0x6ab3b43f,0x4744000))
+assert(not pcall(verify_build,header(0x6aa96b14,0x4744000)))
+assert(not pcall(verify_build,header(0x6ab3b43f,0x4770000)))
+assert(not pcall(verify_build,header(0,0x4744000)))
+assert(not pcall(verify_build,'XX'..header(0x6ab3b43f,0x4744000):sub(3)))
+print('PASS both verified builds accepted; mixed, unknown and invalid headers rejected')
 local heat=unhex(file('data/WeaponHeatComponent.25327279.map.hex'))
 local key,index
 for o=0,#heat-16,16 do

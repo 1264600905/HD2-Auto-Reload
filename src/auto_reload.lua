@@ -1,6 +1,6 @@
 -- HD2-Addon: mods/liu/auto_reload_rounds
 
--- Auto Reload for build 25327279: read-only ammo state, native R input.
+-- Auto Reload for builds 25327279/25480438: read-only ammo state, native R input.
 -- The entity/component layout is adapted from etxp/HD2-C4-Quick-Actions
 -- (MIT); C4-specific action calls and all memory writes are deliberately removed.
 local existing = rawget(_G, 'LiuAutoReloadRounds')
@@ -11,7 +11,7 @@ local CONTINUOUS_RELOAD_INTERVAL_SECONDS = 0.1
 local TACTICAL_RAPID_CLICK_WINDOW_SECONDS = 0.5
 local TACTICAL_CLICK_DELAYS = {0.1, 0.2, 0.4, 0.6}
 -- RELOAD_CONFIG_INSERT
-local state = {revision = DEBUG and 'auto-reload-0.6.1-debug' or 'auto-reload-0.6.1',
+local state = {revision = DEBUG and 'auto-reload-0.6.3-debug' or 'auto-reload-0.6.3',
     ticks = 0, elapsed = 0, snapshots = 0,
     latest_row = nil,
     lmb_edge_time = nil, empty_since = nil, attempted = false, identity = nil,
@@ -85,6 +85,7 @@ local function read_api()
         (cdef_ok and '' or ' error=' .. tostring(cdef_error)))
     local kernel = ffi.load('kernel32')
     local user32 = ffi.load('user32')
+    pcall(ffi.cdef, 'uint32_t __stdcall SendInput(uint32_t, const void *, int);')
     local send_input = ffi.cast(
         'uint32_t (__stdcall *)(uint32_t, const void *, int)', user32.SendInput)
     local get_async_key_state = user32.GetAsyncKeyState
@@ -411,6 +412,13 @@ local function context_reader(api, game, extend)
     return finish(row, 'context_observed')
 end
 
+local function verify_build(pe)
+    assert(pe:sub(1, 4) == 'PE\0\0' and (
+        (u32(pe, 8) == 0x6aa96b14 and u32(pe, 0x50) == 0x4770000) or
+        (u32(pe, 8) == 0x6ab3b43f and u32(pe, 0x50) == 0x4744000)),
+        'unsupported_game_build')
+end
+
 local function verify_layout(api, game)
     -- Internal instructions, not function entry points commonly hooked by mods.
     for _,signature in ipairs({
@@ -442,8 +450,7 @@ local setup_ok, setup_error = pcall(function()
     local pe_offset = u32(dos, 0x3c)
     assert(pe_offset < 0x1000, 'module_pe_offset_invalid')
     local pe = assert(api.read(game + pe_offset, 0x60), 'module_pe_unavailable')
-    assert(pe:sub(1, 4) == 'PE\0\0' and u32(pe, 8) == 0x6aa96b14 and
-        u32(pe, 0x50) == 0x4770000, 'unsupported_game_build')
+    verify_build(pe)
     verify_layout(api, game)
     emit(string.format('SETUP game_base=0x%X read_only=true build=25327279', game))
     -- One known ammo query, identified by the reference project's native

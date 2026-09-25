@@ -17,7 +17,9 @@ Helldivers 2 自动换弹 Mod，依赖 **Bingus Shared Loader v15+ / API 1**。
 - MG-43、GR-8 等站桩换弹武器不再按空仓计时自动请求 R，必须在确认空仓后重新点击射击。MG-43 曾被报告装备后崩溃；本地版按用户要求试验性启用其 Magazine 读取，尚未实机验证。
 
 v5 已获用户实机反馈：功能测试通过，能量武器也能自动换弹。激光大炮另已只读验证未过热 → 过热锁定 → 换散热器后解锁及备用数量减少。此反馈不代表所有武器和场景均已覆盖。
-支持的游戏版本固定为 Steam build `25327279`，更新游戏后需重新验证。
+支持 Steam build `25327279` 和 `25480438`；其他游戏更新仍需重新验证。
+
+本地修复版 **v0.6.3** 已适配 `25480438`。推荐安装 `build/Auto-Reload-v0.6.3-tactical.zip`，普通空仓版为 `build/Auto-Reload-v0.6.3.zip`。在 Mod 管理器中替换旧包、重新部署并重启游戏。此版本通过只读实机关键指令和完整组件表比对；换弹动作仍需安装后实测。核对证据见 [更新记录](docs/BUILD_25480438.md)。下方 v0.6.1 链接为此前发布版，不含本次修复。
 
 ## 安装与测试
 
@@ -32,7 +34,7 @@ v5 已获用户实机反馈：功能测试通过，能量武器也能自动换�
 资源 `11c27d3babb38956`（MG-43）曾被报告装备后崩溃；本地版已试验性启用。测试时先观察装备及空仓前的日志与稳定性，再测试空仓后的新射击点击。
 
 日志位置：`%LOCALAPPDATA%/CowboyBingus/Helldivers2/Logs/AutoReloadRounds.log`。
-本地修复包版本行应含 `revision=auto-reload-0.6.1`。输入被系统接受不等于游戏完成换弹，日志会区分请求、弹药恢复与未确认结果。
+本地修复包版本行应含 `revision=auto-reload-0.6.3`。输入被系统接受不等于游戏完成换弹，日志会区分请求、弹药恢复与未确认结果。
 不要将完整个人运行日志、游戏 DLL 或内存转储提交到本仓库。
 
 ## 构建
@@ -47,8 +49,8 @@ python scripts/build.py --enable-tactical-reload
 python scripts/build.py --game-dir '你的 Steam 游戏目录/Helldivers 2'
 ```
 
-当前本地默认产物为 `build/Auto-Reload-v0.6.1.zip`；加 `--enable-tactical-reload` 会生成 `build/Auto-Reload-v0.6.1-tactical.zip`。二者沿用同一 GUID，只能部署其中一份。正式发布版仍从上面的 v0.6.1 Release 下载。`build/` 不纳入源码提交。
-使用武器配置请选择 **`build/Auto-Reload-v0.6.1-tactical.zip`**。普通 `Auto-Reload-v0.6.1.zip` 只执行空仓换弹。
+当前本地默认产物为 `build/Auto-Reload-v0.6.3.zip`；加 `--enable-tactical-reload` 会生成 `build/Auto-Reload-v0.6.3-tactical.zip`。二者沿用同一 GUID，只能部署其中一份。`build/` 不纳入源码提交。
+使用武器配置请选择 **`build/Auto-Reload-v0.6.3-tactical.zip`**。普通 `Auto-Reload-v0.6.3.zip` 只执行空仓换弹。
 
 “启用战术换弹”是构建前的开关：使用上述参数，或在 [静态换弹配置](src/reload_config.lua) 中将 `ENABLE_TACTICAL_RELOAD` 设为 `true`。配置改动后须重新构建、部署并重启游戏。
 
@@ -59,14 +61,14 @@ python scripts/build.py --game-dir '你的 Steam 游戏目录/Helldivers 2'
 - 其他战术武器余量大于 1 时，只有进入配置阈值的换弹窗口才开始等待 0.1 秒；窗口内相邻点击间隔 ≤0.5 秒时，提高到 0.2、0.4、0.6 秒，从最新点击重新计时。窗口外的点击不计入，离开窗口后清空计时和档位。余量 1 或 0 时不受这段等待限制。逐发续装请求间隔仍为 0.1 秒。
 - 不设置手动换弹抑制：手动 R 不会锁住后续自动请求。自动输入遇到 R 已按下时先松开，下一次更新再按下；每次模拟按键释放后也至少隔一次更新才允许再次按下。发送失败或等待松键不会消耗重试机会。
 
-当前日志版本为 `auto-reload-0.6.1`，`START` 行记录 `tactical_reload=true reload_delay=0`。“立即”指读取、复核符合条件后发送输入，没有额外计时等待；游戏动画和原生动作限制仍可能拒绝换弹。
+当前日志版本为 `auto-reload-0.6.3`，战术版 `START` 行记录 `tactical_reload=true reload_delay=0`。“立即”指读取、复核符合条件后发送输入，没有额外计时等待；游戏动画和原生动作限制仍可能拒绝换弹。
 
 组件 map 以十六进制文本保存在 `data/`，构建时嵌入 Lua；运行时验证完整指纹、资源记录和实体身份。
 游戏内还会验证 DLL PE 标识，以及玩家、实体、物品栏、Rounds、Magazine 和 Heat 的已核对指令片段。v5 使用新版 Magazine/Rounds/Heat 全表指纹和定点槽位。
 
 排查空仓附近闪退时可构建 `python scripts/build.py --debug`，产物为
-`build/Auto-Reload-v0.6.1-debug.zip`；测试配置规则时加 `--enable-tactical-reload`，使用 `build/Auto-Reload-v0.6.1-tactical-debug.zip`。调试包沿用同一 GUID，应替换普通版并重启游戏。
-日志的 `START` 行会显示 `revision=auto-reload-0.6.1-debug debug=true`；
+`build/Auto-Reload-v0.6.3-debug.zip`；测试配置规则时加 `--enable-tactical-reload`，使用 `build/Auto-Reload-v0.6.3-tactical-debug.zip`。调试包沿用同一 GUID，应替换普通版并重启游戏。
+日志的 `START` 行会显示 `revision=auto-reload-0.6.3-debug debug=true`；
 `DEBUG_SNAPSHOT_*`、`DEBUG_AUTO_STEP_*`、`DEBUG_RELOAD_*` 和 `DEBUG_SENDINPUT_*`
 会在接近空仓及请求换弹时记录调用边界。
 日志仍位于 `%LOCALAPPDATA%/CowboyBingus/Helldivers2/Logs/AutoReloadRounds.log`。

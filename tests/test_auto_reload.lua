@@ -573,6 +573,7 @@ test('scan-code press spans frames and failed keyup is retried', function()
         GetAsyncKeyState=function() return stuck_r and -32768 or 0 end,
         SendInput=function(count, input, size)
             assert(count==1 and size==40)
+            input=ffi.cast('const uint8_t *',input)
             local kind=tonumber(ffi.cast('uint32_t *',input)[0])
             local vk=tonumber(ffi.cast('uint16_t *',input+8)[0])
             local scan=tonumber(ffi.cast('uint16_t *',input+10)[0])
