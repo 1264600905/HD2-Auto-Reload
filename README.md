@@ -5,6 +5,15 @@
 Helldivers 2 自动换弹 Mod，依赖 **Bingus Shared Loader v15+ / API 1**。
 本仓库独立维护自动换弹源码、打包工具和测试，不包含 Loader 或其他 Mod 项目。
 
+## 分支与版本
+
+| 分支 | 当前版本 | 用途 |
+| --- | --- | --- |
+| [`main`](https://github.com/1264600905/HD2-Auto-Reload/tree/main) | v0.6.3 | 模拟 R 换弹主干，后续维护版本保持在 v0.7.0 以下 |
+| [`native-test`](https://github.com/1264600905/HD2-Auto-Reload/tree/native-test) | v0.7.0 实验版 | 原生换弹开发与实机测试 |
+
+当前分支为 **`native-test`**。下文的 v0.7.0 包及原生调用说明用于测试；日常使用请切换到 `main` 构建 v0.6.3。原生测试通过并决定正式发布后，再单独评估合入主干。
+
 ## 功能与状态
 
 - 确认空仓后立即复核并请求换弹，取消固定 1 秒等待；游戏获得焦点时每次更新读取弹药。
