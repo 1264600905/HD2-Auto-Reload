@@ -6,10 +6,10 @@
 
 | 安装包 | 用途 |
 | --- | --- |
-| `Auto-Reload-v0.7.0-tactical.zip` | 战术阈值与模拟 R；不调用游戏内部换弹函数 |
-| `Auto-Reload-v0.7.0.zip` | 仅空仓自动换弹与模拟 R |
-| `Auto-Reload-v0.7.0-native-tactical.zip` | 实验性原生换弹优先，并启用战术阈值；无可验证 Reload 组件时回退模拟 R |
-| `Auto-Reload-v0.7.0-native.zip` | 实验性原生换弹优先，仅空仓触发 |
+| `[战术换弹]Auto-Reload-v0.7.0-tactical.zip` | 战术阈值与模拟 R；不调用游戏内部换弹函数 |
+| `[普通换弹]Auto-Reload-v0.7.0.zip` | 仅空仓自动换弹与模拟 R |
+| `[战术换弹]Auto-Reload-v0.7.0-native-tactical.zip` | 实验性原生换弹优先，并启用战术阈值；无可验证 Reload 组件时回退模拟 R |
+| `[普通换弹]Auto-Reload-v0.7.0-native.zip` | 实验性原生换弹优先，仅空仓触发 |
 
 同名 `-debug.zip` 包提供详细诊断日志，不改变对应模式的触发规则。推荐先用输入战术包作稳定基线；希望测试内部函数与 GL-15 两发阈值时，选择原生战术包。
 

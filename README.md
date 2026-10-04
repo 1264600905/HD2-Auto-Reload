@@ -12,7 +12,7 @@ Helldivers 2 自动换弹 Mod，依赖 **Bingus Shared Loader v15+ / API 1**。
 | [`main`](https://github.com/1264600905/HD2-Auto-Reload/tree/main) | v0.6.3 | 模拟 R 换弹主干，后续维护版本保持在 v0.7.0 以下 |
 | [`native-test`](https://github.com/1264600905/HD2-Auto-Reload/tree/native-test) | v0.7.0 实验版 | 原生换弹开发与实机测试 |
 
-当前分支为 **`native-test`**。下文的 v0.7.0 包及原生调用说明用于测试；日常使用请切换到 `main` 构建 v0.6.3。原生测试通过并决定正式发布后，再单独评估合入主干。
+当前分支为 **`native-test`**。下文的 v0.7.0 包及原生调用说明用于测试；日常使用请从 [v0.6.3 Release](https://github.com/1264600905/HD2-Auto-Reload/releases/tag/v0.6.3) 下载，或切换到 `main` 构建。原生测试通过并决定正式发布后，再单独评估合入主干。
 
 ## 功能与状态
 
@@ -28,11 +28,11 @@ Helldivers 2 自动换弹 Mod，依赖 **Bingus Shared Loader v15+ / API 1**。
 v5 已获用户实机反馈：功能测试通过，能量武器也能自动换弹。激光大炮另已只读验证未过热 → 过热锁定 → 换散热器后解锁及备用数量减少。此反馈不代表所有武器和场景均已覆盖。
 支持 Steam build `25327279` 和 `25480438`；其他游戏更新仍需重新验证。
 
-**v0.7.0** 支持已核对的 Steam build `25480438`。常规战术输入版为 `Auto-Reload-v0.7.0-tactical.zip`；原生函数优先的实验版为 `Auto-Reload-v0.7.0-native-tactical.zip`。两种模式仅能安装一份。原生 GL-15 空仓换弹已有实机反馈；v0.7.0 的跨武器原生路径及提前换弹仍待实机验证。版本核对见 [更新记录](docs/BUILD_25480438.md) 与 [原生换弹说明](docs/NATIVE_RELOAD.md)。
+**v0.7.0** 支持已核对的 Steam build `25480438`。常规战术输入版为 `[战术换弹]Auto-Reload-v0.7.0-tactical.zip`；原生函数优先的实验版为 `[战术换弹]Auto-Reload-v0.7.0-native-tactical.zip`。两种模式仅能安装一份。原生 GL-15 空仓换弹已有实机反馈；v0.7.0 的跨武器原生路径及提前换弹仍待实机验证。版本核对见 [更新记录](docs/BUILD_25480438.md) 与 [原生换弹说明](docs/NATIVE_RELOAD.md)。
 
 ## 安装与测试
 
-从 [v0.7.0 Release](https://github.com/1264600905/HD2-Auto-Reload/releases/tag/v0.7.0) 下载战术输入版或原生战术实验版；只需空仓换弹可选对应的非战术包。详见 [v0.7.0 发布说明](docs/RELEASE_0.7.0.md)。也可在本地构建。旧版 v4 不支持此次游戏更新。
+请在 `native-test` 按下方步骤构建 v0.7.0 测试包：可选择战术输入版或原生战术实验版，只需空仓换弹可选对应的非战术包。详见 [v0.7.0 实验版说明](docs/RELEASE_0.7.0.md)。日常使用请选择 v0.6.3 主干版。旧版 v4 不支持此次游戏更新。
 在现用 Mod 管理器中替换旧 Auto Reload，保持只启用一份，再与 Bingus Shared Loader 一起部署。
 新版本沿用旧版 GUID，所以应替换旧包，不应并行安装。
 
@@ -58,14 +58,14 @@ python scripts/build.py --enable-tactical-reload
 python scripts/build.py --game-dir '你的 Steam 游戏目录/Helldivers 2'
 ```
 
-当前本地默认产物为 `build/Auto-Reload-v0.7.0.zip`；加 `--enable-tactical-reload` 会生成 `build/Auto-Reload-v0.7.0-tactical.zip`。所有包沿用同一 GUID，只能部署其中一份。`build/` 不纳入源码提交。
-使用武器配置、但不试验内部函数请选择 **`build/Auto-Reload-v0.7.0-tactical.zip`**。普通 `Auto-Reload-v0.7.0.zip` 只执行空仓换弹。
+当前本地默认产物为 `build/[普通换弹]Auto-Reload-v0.7.0.zip`；加 `--enable-tactical-reload` 会生成 `build/[战术换弹]Auto-Reload-v0.7.0-tactical.zip`。普通及普通原生包（含诊断包）均加 `[普通换弹]` 前缀，战术及原生战术包（含诊断包）均加 `[战术换弹]` 前缀，后面保留原有名称。所有包沿用同一 GUID，只能部署其中一份。`build/` 不纳入源码提交。
+使用武器配置、但不试验内部函数请选择 **`build/[战术换弹]Auto-Reload-v0.7.0-tactical.zip`**。普通 `[普通换弹]Auto-Reload-v0.7.0.zip` 只执行空仓换弹。
 
 ### 原生换弹实验包
 
-`python scripts/build.py --native-reload --enable-tactical-reload --game-dir '你的 Steam 游戏目录/Helldivers 2'` 生成 `build/Auto-Reload-v0.7.0-native-tactical.zip`。只支持 Steam build `25480438`：已验证当前武器的 Reload 组件、配置及动作空闲时调用游戏换弹函数；缺少可验证组件的武器回退到模拟 R。它恢复全部现有空仓与战术规则，不再只限 GL-15。GL-15 沿用**弹匣加膛内总弹 ≤2**的阈值；余量为 2 时仍遵循原有 0.1 秒及连续点击等待，余量为 1 时立即请求。逐发续装只在观察到弹药增加且动作空闲后再次请求。不要与普通包或旧 GL-15 原生实验包同时启用；关闭游戏后替换、部署并重启。仅旧实验包的 GL-15 空仓路径得到实机反馈，其余武器和提前换弹仍需验证。见 [原生换弹说明](docs/NATIVE_RELOAD.md)。
+`python scripts/build.py --native-reload --enable-tactical-reload --game-dir '你的 Steam 游戏目录/Helldivers 2'` 生成 `build/[战术换弹]Auto-Reload-v0.7.0-native-tactical.zip`。只支持 Steam build `25480438`：已验证当前武器的 Reload 组件、配置及动作空闲时调用游戏换弹函数；缺少可验证组件的武器回退到模拟 R。它恢复全部现有空仓与战术规则，不再只限 GL-15。GL-15 沿用**弹匣加膛内总弹 ≤2**的阈值；余量为 2 时仍遵循原有 0.1 秒及连续点击等待，余量为 1 时立即请求。逐发续装只在观察到弹药增加且动作空闲后再次请求。不要与普通包或旧 GL-15 原生实验包同时启用；关闭游戏后替换、部署并重启。仅旧实验包的 GL-15 空仓路径得到实机反馈，其余武器和提前换弹仍需验证。见 [原生换弹说明](docs/NATIVE_RELOAD.md)。
 
-只要原生空仓换弹、不启用战术阈值，可省略 `--enable-tactical-reload`，生成 `build/Auto-Reload-v0.7.0-native.zip`。
+只要原生空仓换弹、不启用战术阈值，可省略 `--enable-tactical-reload`，生成 `build/[普通换弹]Auto-Reload-v0.7.0-native.zip`。
 
 “启用战术换弹”是构建前的开关：使用上述参数，或在 [静态换弹配置](src/reload_config.lua) 中将 `ENABLE_TACTICAL_RELOAD` 设为 `true`。配置改动后须重新构建、部署并重启游戏。
 
@@ -82,7 +82,7 @@ python scripts/build.py --game-dir '你的 Steam 游戏目录/Helldivers 2'
 游戏内还会验证 DLL PE 标识，以及玩家、实体、物品栏、Rounds、Magazine 和 Heat 的已核对指令片段。v5 使用新版 Magazine/Rounds/Heat 全表指纹和定点槽位。
 
 排查空仓附近闪退时可构建 `python scripts/build.py --debug`，产物为
-`build/Auto-Reload-v0.7.0-debug.zip`；测试配置规则时加 `--enable-tactical-reload`，使用 `build/Auto-Reload-v0.7.0-tactical-debug.zip`。调试包沿用同一 GUID，应替换普通版并重启游戏。
+`build/[普通换弹]Auto-Reload-v0.7.0-debug.zip`；测试配置规则时加 `--enable-tactical-reload`，使用 `build/[战术换弹]Auto-Reload-v0.7.0-tactical-debug.zip`。调试包沿用同一 GUID，应替换普通版并重启游戏。
 日志的 `START` 行会显示 `revision=auto-reload-0.7.0-debug debug=true`；
 `DEBUG_SNAPSHOT_*`、`DEBUG_AUTO_STEP_*`、`DEBUG_RELOAD_*` 和 `DEBUG_SENDINPUT_*`
 会在接近空仓及请求换弹时记录调用边界。

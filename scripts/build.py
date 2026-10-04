@@ -120,7 +120,8 @@ def main():
     entry = BUILD / ('auto_reload_entry' + suffix.replace('-', '_') + '.lua')
     entry.write_text(generated, encoding='utf-8', newline='\n')
     version = 'v' + VERSION
-    output = BUILD / ('Auto-Reload-' + version + suffix + '.zip')
+    prefix = '[战术换弹]' if args.enable_tactical_reload else '[普通换弹]'
+    output = BUILD / (prefix + 'Auto-Reload-' + version + suffix + '.zip')
     build_addon('mods/liu/auto_reload_rounds', generated.encode('utf-8'),
                 '4df5aee3-3c5d-47fc-b0e9-0a40f7988738', output,
                 'Auto Reload ' + version + (' tactical' if args.enable_tactical_reload else '') +
