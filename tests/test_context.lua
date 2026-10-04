@@ -48,7 +48,9 @@ local function fixture()
         return resource..word(id)..word(0)..word(unit)..string.char(owned and 1 or 0)..'\0\0\0'
     end
     local game,pm,owner,inv,driver,hm=0x100000,0x200000,0x4000000,0x300000,0x400000,0x500000
-    for rva,value in pairs({[0x3326468]=pm,[0x346bf98]=owner,[0x3326738]=inv,[0x3326660]=driver,[0x3326d48]=hm}) do put(game+rva,ptr(value)) end
+    for rva,value in pairs({[0x3326468]=pm,[0x346bf98]=owner,[0x3326738]=inv,[0x3326660]=driver,[0x3326d48]=hm,
+        [0x3326d78]=0x700000,[0x3326420]=0x800000}) do put(game+rva,ptr(value)) end
+    map(0x700020,nil,nil)
     put(pm+0x84,word(1)..word(1));put(pm+0xe8,ptr(0x210000))
     put(0x210000,entity(string.rep('P',8),5,123,true));map(pm+0xd0,5,0);put(pm+0x3a8,word(123))
     map(owner+0xf22ec8,123,1);map(owner+0xf1aeb0,42,2)
@@ -69,6 +71,7 @@ local function fixture()
     local reader=factory()
     return {put=put,read=read,api={read=read,pointer=pointer},
         run=function(api)return reader(api or {read=read,pointer=pointer},game)end,
+        map=map, game=game, owner=owner,
         weapon_address=owner+0xf32f18+48,avatar_address=owner+0xf32f18+24}
 end
 local s=fixture();local row=assert(s.run())
@@ -89,3 +92,69 @@ s.api.read=function(a,n)
 end
 local changed,reason=s.run(s.api);assert(changed==nil and reason=='context_changed_during_read')
 print('PASS selection changed during guard re-read discards entire snapshot')
+
+local function mounted(resource_id, seat_type, seat_number, count, path)
+    local s=fixture()
+    local resource_key=unhex(resource_id):reverse()
+    s.put(s.weapon_address,resource_key)
+    s.map(0x700020,7,0);s.put(0x700010,word(1));s.put(0x700038,ptr(0x710000))
+    s.put(0x710000,ptr(s.avatar_address));s.put(0x700048,ptr(0x720000))
+    s.put(0x720000,string.rep('\0',64));s.put(0x720000,word(100)..word(seat_type)..word(4))
+    s.put(0x720014,word(seat_number))
+    s.map(0x800030,7,0);s.put(0x800060,ptr(0x810000));s.put(0x810000,word(42)..word(0))
+    local rounds=path=='weapon_rounds'
+    s.put(0x420000,word(rounds and 0x100 or 0x80)..string.rep('\0',36))
+    local component_map=unhex(file(rounds and 'data/WeaponRoundsComponent.25327279.map.hex' or
+        'data/WeaponMagazineComponent.25327279.map.hex'))
+    local idx
+    for o=0,#component_map-16,16 do
+        if component_map:sub(o+1,o+8)==resource_key then
+            local n=ffi.new('uint32_t[1]');ffi.copy(n,component_map:sub(o+9,o+12),4);idx=tonumber(n[0]);break
+        end
+    end
+    assert(idx)
+    s.put(s.owner+(rounds and 0xf12820 or 0xf124a0),ptr(0xb000000))
+    s.put(0xb000000,component_map)
+    s.put(0xb000000+#component_map+idx*(rounds and 0x88 or 160),string.rep('\0',rounds and 0x88 or 160))
+    s.put(s.game+(rounds and 0x3326cf0 or 0x3326648),ptr(0xc00000))
+    s.map(0xc00000+(rounds and 0x28 or 0x20),42,0)
+    s.put(0xc00000+(rounds and 0x40 or 0x38),ptr(0xc10000));s.put(0xc10000,ptr(s.weapon_address))
+    s.put(0xc00000+(rounds and 0x50 or 0x48),ptr(0xc20000))
+    s.put(0xc20000,rounds and (word(1)..word(count)..string.rep('\0',16)) or
+        (word(count)..string.rep('\0',12)))
+    s.put(0xc00000+(rounds and 0x58 or 0x50),ptr(0xc30000))
+    s.put(0xc30000,string.rep('\0',rounds and 20 or 12))
+    if rounds then s.map(0xc00068,nil,nil)
+    else
+        s.put(s.game+0x744d02,unhex('488b2d3f19be02'))
+        s.put(s.game+0x744d6c,unhex('488b4d38488bdf48c1e30448035d48488b0cf9e8bce9daff80b89c000000007420488b4550488d0c7f807c880800750a837b08000f85b600000032c0e9b1000000833b000f9fc0e9a6000000'))
+    end
+    return s
+end
+for _,target in ipairs({
+    {'df51fe8d62f294be',10,0,6,'weapon_rounds'},
+    {'1fa1f596769225c2',43,1,1,'weapon_magazine'},
+    {'d58ae6a04edb10de',44,1,300,'weapon_magazine'},
+}) do
+    s=mounted(unpack(target));local vehicle=assert(s.run())
+    assert(vehicle.context_status=='context_observed' and vehicle.weapon_context=='vehicle')
+    assert(vehicle.current_weapon_resource==target[1] and vehicle.selected_entity_id==42)
+    assert((vehicle.magazine_count or vehicle.rounds_magazine_count)==target[4])
+    assert(vehicle._selection_bytes and vehicle.memory_bytes<32768)
+end
+print('PASS all three supported vehicle weapons resolve through the local avatar, not inventory')
+s=mounted('df51fe8d62f294be',10,0,5,'weapon_rounds')
+s.put(0x720008,word(3));assert(s.run().context_status=='vehicle_role_unsupported')
+s.put(0x720008,word(4));s.put(0x720030,word(1));assert(s.run().context_status=='vehicle_seat_transition')
+s.put(0x720030,word(0));s.put(0x720014,word(1));assert(s.run().context_status=='vehicle_weapon_unsupported')
+s.put(0x720014,word(0));s.put(0x720004,word(43));assert(s.run().context_status=='vehicle_weapon_unsupported')
+s.put(0x720004,word(10));s.put(0x710000,ptr(s.weapon_address));assert(not pcall(s.run))
+print('PASS passenger, transition, wrong seat, wrong vehicle type and foreign Seater owner rejected')
+s=mounted('df51fe8d62f294be',10,0,5,'weapon_rounds')
+original=s.api.read;count=0
+s.api.read=function(a,n)
+    if a==0x810000 and n==8 then count=count+1;if count==2 then s.put(0x810000,word(99)..word(0)) end end
+    return original(a,n)
+end
+changed,reason=s.run(s.api);assert(changed==nil and reason=='context_changed_during_read')
+print('PASS mounted weapon changed during snapshot re-read discards the entire snapshot')

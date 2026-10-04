@@ -20,7 +20,7 @@ class ReloadConfigTests(unittest.TestCase):
         validate_reload_config(self.config)
         tactical = self.config.split('local tactical_rules = {', 1)[1].split('\n}\n', 1)[0]
         ids = re.findall(r"\['([0-9a-f]{16})'\] = \{name=", tactical)
-        self.assertEqual((len(ids), len(set(ids))), (50, 50))
+        self.assertEqual((len(ids), len(set(ids))), (53, 53))
         for excluded in ('80f1a156d9fa1e36',  # JAR-5
                          'a32621e3bde13379',  # Guard Dog AR-23
                          '54d86057f5dacfb9'):  # AC-8 sentry

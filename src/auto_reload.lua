@@ -11,7 +11,7 @@ local CONTINUOUS_RELOAD_INTERVAL_SECONDS = 0.1
 local TACTICAL_RAPID_CLICK_WINDOW_SECONDS = 0.5
 local TACTICAL_CLICK_DELAYS = {0.1, 0.2, 0.4, 0.6}
 -- RELOAD_CONFIG_INSERT
-local state = {revision = DEBUG and 'auto-reload-0.6.3-debug' or 'auto-reload-0.6.3',
+local state = {revision = DEBUG and 'auto-reload-0.6.4-debug' or 'auto-reload-0.6.4',
     ticks = 0, elapsed = 0, snapshots = 0,
     latest_row = nil,
     lmb_edge_time = nil, empty_since = nil, attempted = false, identity = nil,
@@ -46,6 +46,12 @@ end
 
 local bit = require('bit')
 local INVALID = 0xffffffff
+-- Catalog IDs plus live local-player Wieldable/Seater observations.
+local vehicle_resources = {
+    ['1fa1f596769225c2'] = {seat_type=0x2b, seat_index=1, path='weapon_magazine'},
+    ['d58ae6a04edb10de'] = {seat_type=0x2c, seat_index=1, path='weapon_magazine'},
+    ['df51fe8d62f294be'] = {seat_type=0x0a, seat_index=0, path='weapon_rounds'},
+}
 
 local function u32(bytes, offset)
     assert(bytes and offset >= 0 and offset + 4 <= #bytes, 'short_u32')
@@ -307,19 +313,54 @@ local function context_reader(api, game, extend)
     local entity_id = u32(entity, 8)
     row.local_entity_id = entity_id
 
-    local inventory = global(0x3326738)
-    local inventory_index = lookup(inventory + 0x28, entity_id, 65536)
-    local inventory_count = u32(read(inventory + 0x14, 4, true), 0)
-    if not inventory_index or inventory_index >= inventory_count then return finish(row, 'inventory_missing') end
-    if read(pointer(pointer(inventory + 0x40, true) + inventory_index * 8, true), 24, true) ~= entity then
-        return finish(row, 'inventory_owner_mismatch')
+    -- Inventory retains the handheld selection while seated. The Pilot R path
+    -- (0xa7f674) resolves local-avatar Wieldable slot 0 via 0x786920 instead.
+    -- Read that selection without calling either function.
+    local seater = global(0x3326d78)
+    local seat_index = lookup(seater + 0x20, entity_id, 65536)
+    local weapon_id
+    row.weapon_context = 'on_foot'
+    if seat_index then
+        assert(seat_index < u32(read(seater + 0x10, 4, true), 0) and seat_index < 256,
+            'seater_index_invalid')
+        assert(read(pointer(pointer(seater + 0x38, true) + seat_index * 8, true), 24, true) == entity,
+            'seater_owner_mismatch')
+        local seat_address = pointer(seater + 0x48, true) + seat_index * 64
+        local seat = read(seat_address, 24, true)
+        local seat_entity, role = u32(seat, 0), u32(seat, 8)
+        if u32(read(seat_address + 0x30, 4, true), 0) ~= 0 then
+            return finish(row, 'vehicle_seat_transition')
+        end
+        if seat_entity ~= 0 and role ~= 0 then
+            row.weapon_context = 'vehicle'
+            row.seat_entity_id, row.seat_type, row.seat_role = seat_entity, u32(seat, 4), role
+            row.seat_index = u32(seat, 0x14)
+            if role ~= 4 then return finish(row, 'vehicle_role_unsupported') end
+            local wield = global(0x3326420)
+            local wield_index = lookup(wield + 0x30, entity_id, 65536)
+            if not wield_index then return finish(row, 'vehicle_wield_missing') end
+            assert(wield_index < 4096, 'wield_index_invalid')
+            local selection = read(pointer(wield + 0x60, true) + wield_index * 0x1d0, 8, true)
+            weapon_id = u32(selection, 0)
+            row.selected_slot = 'vehicle_primary'
+            row._selection_bytes = seat .. selection
+        end
     end
-    local inventory_state = read(pointer(inventory + 0x50, true) + inventory_index * 48, 48, true)
-    local slot = u32(inventory_state, 0x1c)
-    row.selected_slot = slot
-    local slot_offsets = {[1] = 0, [2] = 4, [3] = 8, [4] = 16, [5] = 16, [6] = 12}
-    if not slot_offsets[slot] then return finish(row, 'no_selected_weapon') end
-    local weapon_id = u32(inventory_state, slot_offsets[slot])
+    if not weapon_id then
+        local inventory = global(0x3326738)
+        local inventory_index = lookup(inventory + 0x28, entity_id, 65536)
+        local inventory_count = u32(read(inventory + 0x14, 4, true), 0)
+        if not inventory_index or inventory_index >= inventory_count then return finish(row, 'inventory_missing') end
+        if read(pointer(pointer(inventory + 0x40, true) + inventory_index * 8, true), 24, true) ~= entity then
+            return finish(row, 'inventory_owner_mismatch')
+        end
+        local inventory_state = read(pointer(inventory + 0x50, true) + inventory_index * 48, 48, true)
+        local slot = u32(inventory_state, 0x1c)
+        row.selected_slot = slot
+        local slot_offsets = {[1] = 0, [2] = 4, [3] = 8, [4] = 16, [5] = 16, [6] = 12}
+        if not slot_offsets[slot] then return finish(row, 'no_selected_weapon') end
+        weapon_id = u32(inventory_state, slot_offsets[slot])
+    end
     row.selected_entity_id = weapon_id
     if weapon_id == 0 or weapon_id == INVALID then return finish(row, 'selected_entity_missing') end
 
@@ -331,6 +372,14 @@ local function context_reader(api, game, extend)
     row.current_weapon_resource = resource(weapon)
     row.current_weapon = row.current_weapon_resource
     row.weapon_owned = bit.band(weapon:byte(21), 1) ~= 0
+    if row.weapon_context == 'vehicle' then
+        local supported = vehicle_resources[row.current_weapon_resource]
+        if not supported or supported.seat_type ~= row.seat_type or supported.seat_index ~= row.seat_index then
+            return finish(row, 'vehicle_weapon_unsupported')
+        end
+    elseif vehicle_resources[row.current_weapon_resource] then
+        return finish(row, 'vehicle_selection_unverified')
+    end
     if unsafe_resources[row.current_weapon_resource] then return finish(row, 'unsafe_resource') end
     if not row.weapon_owned then return finish(row, 'weapon_not_owned') end
 
@@ -349,6 +398,10 @@ local function context_reader(api, game, extend)
     elseif bit.band(flags, 0x400) ~= 0 then row.ammo_path = 'weapon_resource'
     elseif bit.band(flags, 0x200) ~= 0 then row.ammo_path = 'weapon_heat'
     else row.ammo_path = 'no_native_ammo_component' end
+    if row.weapon_context == 'vehicle' and
+        vehicle_resources[row.current_weapon_resource].path ~= row.ammo_path then
+        return finish(row, 'vehicle_ammo_path_mismatch')
+    end
 
     if row.ammo_path == 'weapon_rounds' then
         local rounds_manager = global(0x3326cf0)
@@ -435,6 +488,12 @@ local function verify_layout(api, game)
         {0x4fddc2, '4869c088000000'}, -- rounds effective config stride
         {0x76307f, '44386f5074640f2f7760725e488b4658c644a80801'}, -- overheat latch set
         {0x7630ac, 'f30f1047640f2fc6723380bf9000000000752a488b4658c644a80800'}, -- latch clear
+        {0x4bd05d, '4c8b1d149de602'}, -- Seater global
+        {0x4bd090, '498b4338'}, -- Seater entity registry
+        {0xa7d83c, '448be849c1e5064c036e48'}, -- Seater state stride/base
+        {0xa7f67d, '488b0d9c6d8a02'}, -- Wieldable global in Pilot R path
+        {0x786945, '448b59384533c98b5940'}, -- Wieldable entity map
+        {0x7869f3, '4969cbd00100004b8d04b648c1e0044903c18b0c01890a'}, -- slot stride/base, primary entity
     }) do
         assert(hex(assert(api.read(game + signature[1], #signature[2] / 2), 'layout_code_unavailable')) ==
             signature[2], string.format('unsupported_layout_at_%x', signature[1]))
@@ -479,6 +538,9 @@ local function log_row(row, error_message, phase)
         'CTX', 'tick=' .. state.ticks, string.format('elapsed=%.3f', state.elapsed),
         'phase=' .. scalar(phase), 'status=' .. scalar(row.context_status),
         'slot=' .. scalar(row.selected_slot), 'entity=' .. scalar(row.selected_entity_id),
+        'weapon_context=' .. scalar(row.weapon_context),
+        'seat_entity=' .. scalar(row.seat_entity_id), 'seat_type=' .. scalar(row.seat_type),
+        'seat_role=' .. scalar(row.seat_role), 'seat_index=' .. scalar(row.seat_index),
         'resource=' .. scalar(row.current_weapon_resource), 'weapon=' .. scalar(row.current_weapon),
         'owned=' .. scalar(row.weapon_owned), 'driver_flags=' .. scalar(row.weapon_driver_flags),
         'ammo_path=' .. scalar(row.ammo_path), 'ammo_status=' .. scalar(row.ammo_status),
@@ -686,6 +748,8 @@ local function fresh_context_matches(row, fresh)
         fresh.selected_slot == row.selected_slot and
         fresh.ammo_path == row.ammo_path and
         fresh._weapon_bytes == row._weapon_bytes and
+        fresh.weapon_context == row.weapon_context and
+        fresh._selection_bytes == row._selection_bytes and
         fresh.local_entity_id == row.local_entity_id and
         fresh.current_weapon_resource == row.current_weapon_resource
 end
@@ -759,7 +823,8 @@ local function auto_reload_step()
         return
     end
     local identity = tostring(row.current_weapon_resource) .. ':' .. tostring(row.selected_entity_id) ..
-        ':' .. tostring(row.selected_slot) .. ':' .. tostring(row._weapon_bytes) .. ':' .. tostring(row.local_entity_id)
+        ':' .. tostring(row.selected_slot) .. ':' .. tostring(row._weapon_bytes) .. ':' .. tostring(row.local_entity_id) ..
+        ':' .. tostring(row.weapon_context) .. ':' .. tostring(row._selection_bytes)
     if identity ~= state.identity then
         state.identity, state.empty_since, state.attempted = identity, nil, false
         state.request_at, state.last_request = nil, nil
@@ -892,7 +957,8 @@ local function continuous_reload_step()
     if count == 1 then return end
     if count and count > 1 and not rule.immediate and not tactical_click_wait_finished() then return end
     local identity = tostring(row.current_weapon_resource) .. ':' .. tostring(row.selected_entity_id) ..
-        ':' .. tostring(row.selected_slot) .. ':' .. tostring(row._weapon_bytes) .. ':' .. tostring(row.local_entity_id)
+        ':' .. tostring(row.selected_slot) .. ':' .. tostring(row._weapon_bytes) .. ':' .. tostring(row.local_entity_id) ..
+        ':' .. tostring(row.weapon_context) .. ':' .. tostring(row._selection_bytes)
     if identity ~= state.continuous_identity then
         state.continuous_identity = identity
         state.continuous_probe_at = nil

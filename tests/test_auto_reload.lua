@@ -22,9 +22,13 @@ local function scenario(tactical_enabled)
             sent=sent+1; return true,'test'
         end}
     local selected_policies = policies
+    -- Keep generic magazine click-timing coverage independent of SG-8P's
+    -- production policy, which now correctly requires an empty magazine.
+    selected_policies = selected_policies:gsub('local tactical_rules = {',
+        "local tactical_rules = {\n    ['timing_fixture'] = {name='test timing', path='weapon_magazine', limit=8},", 1)
     if tactical_enabled then
         local count
-        selected_policies, count = policies:gsub('local ENABLE_TACTICAL_RELOAD = false',
+        selected_policies, count = selected_policies:gsub('local ENABLE_TACTICAL_RELOAD = false',
             'local ENABLE_TACTICAL_RELOAD = true')
         assert(count == 1)
     end
@@ -109,8 +113,47 @@ test('configured magazine families use exact player-held resource IDs', function
         s.row.current_weapon_resource=id; assert(not s.empty(s.row),id)
     end
     s.row.current_weapon_resource='05d8d8c073b9d502' -- SG-8P
-    s.row.magazine_count=8; assert(s.empty(s.row))
+    s.row.magazine_count=8; assert(not s.empty(s.row))
     s.row.magazine_count=9; assert(not s.empty(s.row))
+    s.row.magazine_count=1; assert(not s.empty(s.row))
+    s.row.magazine_count=0; assert(s.empty(s.row))
+end)
+
+test('Breakthrough tactical loading starts at five and stops above five', function()
+    local s=scenario(true);s.row.current_weapon_resource='df51fe8d62f294be'
+    s.row.weapon_context='vehicle';s.row._selection_bytes='seatA:gun0'
+    s.row.rounds_magazine_count=6;s.continuous_step(0);assert(s.sent()==0)
+    s.row.rounds_magazine_count=5;s.continuous_step(1);assert(s.sent()==0)
+    s.continuous_step(1.11);assert(s.sent()==1)
+    s.row.rounds_magazine_count=6;s.continuous_step(1.22);assert(s.sent()==1)
+    local off=scenario();off.row.current_weapon_resource='df51fe8d62f294be'
+    off.row.rounds_magazine_count=5;off.continuous_step(0);off.continuous_step(1);assert(off.sent()==0)
+    off.row.rounds_magazine_count=0;off.continuous_step(2);assert(off.sent()==1)
+end)
+
+test('tank cannons wait for empty and do not reload an unattended weapon', function()
+    for _,enabled in ipairs({false,true}) do
+        for _,id in ipairs({'1fa1f596769225c2','d58ae6a04edb10de'}) do
+            local s=scenario(enabled);s.row.current_weapon_resource=id
+            s.row.ammo_path='weapon_magazine';s.row.magazine_verified=true;s.row.magazine_chamber_token=0
+            s.row.magazine_count=1;s.step(0);assert(s.sent()==0)
+            s.row.magazine_count=0;s.step(1);assert(s.sent()==1)
+            s.step(2);assert(s.sent()==1)
+        end
+    end
+    local s=scenario(true);s.row.current_weapon_resource='df51fe8d62f294be'
+    s.row.rounds_magazine_count=5;s.row.context_status='vehicle_role_unsupported'
+    s.continuous_step(0);s.continuous_step(1);assert(s.sent()==0)
+end)
+
+test('changing seat or leaving a vehicle cancels the refreshed reload request', function()
+    for _,change in ipairs({'seat','context'}) do
+        local s=scenario(true);s.row.current_weapon_resource='df51fe8d62f294be'
+        s.row.rounds_magazine_count=5;s.row.weapon_context='vehicle';s.row._selection_bytes='seatA:gun0'
+        local fresh={};for k,v in pairs(s.row) do fresh[k]=v end
+        if change=='seat' then fresh._selection_bytes='seatB:gun0' else fresh.weapon_context='on_foot' end
+        s.fresh(fresh);s.continuous_step(0);s.continuous_step(1);assert(s.sent()==0)
+    end
 end)
 
 test('new rounds thresholds use magazine count and AC-8 stays single request', function()
@@ -193,7 +236,7 @@ test('click delays start at window entry and reset after leaving it', function()
             s.row.current_weapon_resource='41eac4a03987faa0' -- SG-8, limit 8
         else
             s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
-            s.row.current_weapon_resource='05d8d8c073b9d502' -- SG-8P, limit 8
+            s.row.current_weapon_resource='timing_fixture'
         end
         local field=continuous and 'rounds_magazine_count' or 'magazine_count'
         local step=continuous and s.continuous_step or s.step
@@ -213,7 +256,7 @@ end)
 
 test('rapid clicks lengthen tactical wait from last click to 0.6 seconds', function()
     local s=scenario(true); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
-    s.row.current_weapon_resource='05d8d8c073b9d502' -- SG-8P, limit 8
+    s.row.current_weapon_resource='timing_fixture'
     s.row.magazine_count=8; s.row.magazine_chamber_token=259
     s.click(0); s.step(0); s.step(.099); assert(s.sent()==0)
     s.step(.101); assert(s.sent()==1)
@@ -227,7 +270,7 @@ end)
 
 test('rapid click cap and gap reset use the latest click', function()
     local s=scenario(true); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
-    s.row.current_weapon_resource='05d8d8c073b9d502'
+    s.row.current_weapon_resource='timing_fixture'
     s.row.magazine_count=8; s.row.magazine_chamber_token=259
     for _,t in ipairs({0,.2,.4,.6,.8}) do s.click(t); s.step(t) end
     s.step(1.399); assert(s.sent()==0)
@@ -255,14 +298,14 @@ test('one tactical round sends R in the observing update without a click', funct
     s.row.rounds_magazine_count=0 -- total ammo is one
     s.continuous_step(0); assert(s.sent()==1)
     local m=scenario(true); m.row.ammo_path='weapon_magazine'; m.row.magazine_verified=true
-    m.row.current_weapon_resource='05d8d8c073b9d502'; m.row.magazine_count=1
+    m.row.current_weapon_resource='timing_fixture'; m.row.magazine_count=1
     m.row.magazine_chamber_token=259
     m.step(0); assert(m.sent()==1)
 end)
 
 test('one round overrides rapid-click wait and prior tactical request', function()
     local s=scenario(true); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
-    s.row.current_weapon_resource='05d8d8c073b9d502'
+    s.row.current_weapon_resource='timing_fixture'
     s.row.magazine_count=8; s.row.magazine_chamber_token=259
     s.click(0); s.step(0); s.step(.101); assert(s.sent()==1)
     s.click(.2); s.step(.2); s.row.magazine_count=1
@@ -272,7 +315,7 @@ end)
 
 test('one-round request waits for our key release and rearms on ammo change', function()
     local s=scenario(true); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
-    s.row.current_weapon_resource='05d8d8c073b9d502' -- SG-8P retains limit 8
+    s.row.current_weapon_resource='timing_fixture'
     s.row.magazine_count=1; s.row.magazine_chamber_token=259
     s.own_key(true); s.step(0); assert(s.sent()==0)
     s.own_key(false); s.step(.081); assert(s.sent()==1)
@@ -283,7 +326,7 @@ end)
 
 test('fresh ammo dropping to zero still requests immediately', function()
     local s=scenario(true); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
-    s.row.current_weapon_resource='05d8d8c073b9d502'
+    s.row.current_weapon_resource='timing_fixture'
     s.row.magazine_count=1; s.row.magazine_chamber_token=259
     local fresh={}; for k,v in pairs(s.row) do fresh[k]=v end
     fresh.magazine_count=0; s.fresh(fresh)
@@ -292,7 +335,7 @@ end)
 
 test('manual R does not suppress the one-round tactical request', function()
     local s=scenario(true); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
-    s.row.current_weapon_resource='05d8d8c073b9d502' -- SG-8P retains limit 8
+    s.row.current_weapon_resource='timing_fixture'
     s.row.magazine_count=1; s.row.magazine_chamber_token=259
     s.state.keys.R=true; s.step(0); assert(s.sent()==1)
     s.state.keys.R=false; s.step(.1); assert(s.sent()==1)

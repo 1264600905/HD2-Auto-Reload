@@ -2,7 +2,7 @@
 -- false keeps ordinary empty reloads; true enables the limits below.
 local ENABLE_TACTICAL_RELOAD = false -- 启用战术换弹
 
--- Keys are exact resource IDs for player-held weapons in build 25327279.
+-- Keys are exact resource IDs for held or verified selected vehicle weapons.
 -- limit counts the selected magazine only unless basis='total' is specified.
 -- immediate skips the firing-click wait for fast weapons.
 -- continuous is for weapons that load individual rounds. Do not use it for AC-8.
@@ -46,7 +46,7 @@ local tactical_rules = {
     ['e6d932be83729076'] = {name='R-6', path='weapon_rounds', limit=3, continuous=true},
     ['41eac4a03987faa0'] = {name='SG-8', path='weapon_rounds', limit=8, continuous=true},
     ['4f749e2ee26f532d'] = {name='SG-8S', path='weapon_rounds', limit=8, continuous=true},
-    ['05d8d8c073b9d502'] = {name='SG-8P', path='weapon_magazine', limit=8},
+    ['05d8d8c073b9d502'] = {name='SG-8P', path='weapon_magazine', limit=0},
     ['4e310b1fe4c52b52'] = {name='SG-20', path='weapon_rounds', limit=8, continuous=true},
     ['d323de60855898ac'] = {name='SG-451', path='weapon_rounds', limit=8, continuous=true},
     ['dcd1c835407ef7ba'] = {name='SG-97', path='weapon_rounds', limit=4, basis='total', continuous=true},
@@ -62,6 +62,11 @@ local tactical_rules = {
     ['a8cffb316f0b5c5f'] = {name='AC-8', path='weapon_rounds', limit=0},
     ['02eecd0b1fa49630'] = {name='GL-21', path='weapon_magazine', limit=0},
     ['1d5943301a29c940'] = {name='GL-21 MK2', path='weapon_magazine', limit=0},
+
+    -- Only the local player's verified vehicle weapon selection can reach these.
+    ['1fa1f596769225c2'] = {name='TD-220 Bastion cannon', path='weapon_magazine', limit=0},
+    ['d58ae6a04edb10de'] = {name='TD-110 Maelstrom cannon', path='weapon_magazine', limit=0},
+    ['df51fe8d62f294be'] = {name='EXO-55 Breakthrough shotgun', path='weapon_rounds', limit=5, continuous=true},
 }
 
 -- These weapons only request R after a verified empty state and a new attack press.
