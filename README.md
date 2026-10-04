@@ -28,11 +28,11 @@ Helldivers 2 自动换弹 Mod，依赖 **Bingus Shared Loader v15+ / API 1**。
 v5 已获用户实机反馈：功能测试通过，能量武器也能自动换弹。激光大炮另已只读验证未过热 → 过热锁定 → 换散热器后解锁及备用数量减少。此反馈不代表所有武器和场景均已覆盖。
 支持 Steam build `25327279` 和 `25480438`；其他游戏更新仍需重新验证。
 
-主干 **v0.6.3** 已适配 `25480438`。推荐安装 `build/Auto-Reload-v0.6.3-tactical.zip`，普通空仓版为 `build/Auto-Reload-v0.6.3.zip`。在 Mod 管理器中替换旧包、重新部署并重启游戏。此版本通过只读实机关键指令和完整组件表比对；换弹动作仍需安装后实测。核对证据见 [更新记录](docs/BUILD_25480438.md)。
+主干 **v0.6.3** 已适配 `25480438`。推荐安装 `build/[战术换弹]Auto-Reload-v0.6.3-tactical.zip`，普通空仓版为 `build/[普通换弹]Auto-Reload-v0.6.3.zip`。在 Mod 管理器中替换旧包、重新部署并重启游戏。此版本通过只读实机关键指令和完整组件表比对；换弹动作仍需安装后实测。核对证据见 [更新记录](docs/BUILD_25480438.md)。
 
 ## 安装与测试
 
-请在 `main` 按下方构建步骤生成 v0.6.3：推荐 `Auto-Reload-v0.6.3-tactical.zip`（启用武器配置），仅普通空仓换弹可选 `Auto-Reload-v0.6.3.zip`。完整功能说明见 [0.6.0 发布说明](docs/RELEASE_0.6.0.md)。历史 v0.6.1 包不含此次游戏更新的适配与初始化修复；v0.7.0 包对应 `native-test` 实验分支。
+从 [v0.6.3 Release](https://github.com/1264600905/HD2-Auto-Reload/releases/tag/v0.6.3) 下载，或在 `main` 按下方构建步骤生成：推荐 `[战术换弹]Auto-Reload-v0.6.3-tactical.zip`（启用武器配置），仅普通空仓换弹可选 `[普通换弹]Auto-Reload-v0.6.3.zip`。安装与修复说明见 [v0.6.3 发布说明](docs/RELEASE_0.6.3.md)。历史 v0.6.1 包不含此次游戏更新的适配与初始化修复；v0.7.0 包对应 `native-test` 实验分支。
 在现用 Mod 管理器中替换旧 Auto Reload，保持只启用一份，再与 Bingus Shared Loader 一起部署。
 新版本沿用旧版 GUID，所以应替换旧包，不应并行安装。
 
@@ -43,7 +43,7 @@ v5 已获用户实机反馈：功能测试通过，能量武器也能自动换�
 资源 `11c27d3babb38956`（MG-43）曾被报告装备后崩溃；本地版已试验性启用。测试时先观察装备及空仓前的日志与稳定性，再测试空仓后的新射击点击。
 
 日志位置：`%LOCALAPPDATA%/CowboyBingus/Helldivers2/Logs/AutoReloadRounds.log`。
-本地修复包版本行应含 `revision=auto-reload-0.6.3`。输入被系统接受不等于游戏完成换弹，日志会区分请求、弹药恢复与未确认结果。
+v0.6.3 包版本行应含 `revision=auto-reload-0.6.3`。输入被系统接受不等于游戏完成换弹，日志会区分请求、弹药恢复与未确认结果。
 不要将完整个人运行日志、游戏 DLL 或内存转储提交到本仓库。
 
 ## 构建
@@ -58,8 +58,8 @@ python scripts/build.py --enable-tactical-reload
 python scripts/build.py --game-dir '你的 Steam 游戏目录/Helldivers 2'
 ```
 
-当前本地默认产物为 `build/Auto-Reload-v0.6.3.zip`；加 `--enable-tactical-reload` 会生成 `build/Auto-Reload-v0.6.3-tactical.zip`。二者沿用同一 GUID，只能部署其中一份。`build/` 不纳入源码提交。
-使用武器配置请选择 **`build/Auto-Reload-v0.6.3-tactical.zip`**。普通 `Auto-Reload-v0.6.3.zip` 只执行空仓换弹。
+当前本地默认产物为 `build/[普通换弹]Auto-Reload-v0.6.3.zip`；加 `--enable-tactical-reload` 会生成 `build/[战术换弹]Auto-Reload-v0.6.3-tactical.zip`。普通和普通诊断包均加 `[普通换弹]` 前缀，战术和战术诊断包均加 `[战术换弹]` 前缀，后面保留原有名称。二者沿用同一 GUID，只能部署其中一份。`build/` 不纳入源码提交。
+使用武器配置请选择 **`build/[战术换弹]Auto-Reload-v0.6.3-tactical.zip`**。普通 `[普通换弹]Auto-Reload-v0.6.3.zip` 只执行空仓换弹。
 
 “启用战术换弹”是构建前的开关：使用上述参数，或在 [静态换弹配置](src/reload_config.lua) 中将 `ENABLE_TACTICAL_RELOAD` 设为 `true`。配置改动后须重新构建、部署并重启游戏。
 
@@ -76,7 +76,7 @@ python scripts/build.py --game-dir '你的 Steam 游戏目录/Helldivers 2'
 游戏内还会验证 DLL PE 标识，以及玩家、实体、物品栏、Rounds、Magazine 和 Heat 的已核对指令片段。v5 使用新版 Magazine/Rounds/Heat 全表指纹和定点槽位。
 
 排查空仓附近闪退时可构建 `python scripts/build.py --debug`，产物为
-`build/Auto-Reload-v0.6.3-debug.zip`；测试配置规则时加 `--enable-tactical-reload`，使用 `build/Auto-Reload-v0.6.3-tactical-debug.zip`。调试包沿用同一 GUID，应替换普通版并重启游戏。
+`build/[普通换弹]Auto-Reload-v0.6.3-debug.zip`；测试配置规则时加 `--enable-tactical-reload`，使用 `build/[战术换弹]Auto-Reload-v0.6.3-tactical-debug.zip`。调试包沿用同一 GUID，应替换普通版并重启游戏。
 日志的 `START` 行会显示 `revision=auto-reload-0.6.3-debug debug=true`；
 `DEBUG_SNAPSHOT_*`、`DEBUG_AUTO_STEP_*`、`DEBUG_RELOAD_*` 和 `DEBUG_SENDINPUT_*`
 会在接近空仓及请求换弹时记录调用边界。
