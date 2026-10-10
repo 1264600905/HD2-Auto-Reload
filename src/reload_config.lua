@@ -1,10 +1,11 @@
--- Static, build-time configuration. Edit this file and rebuild the package.
--- false keeps ordinary empty reloads; true enables the limits below.
+-- Build-time defaults and weapon rules. Mod Options Menu can override the switch.
+-- Without the menu, false keeps ordinary empty reloads; true enables these limits.
 local ENABLE_TACTICAL_RELOAD = false -- 启用战术换弹
 
 -- Keys are exact resource IDs for held or verified selected vehicle weapons.
 -- limit counts the selected magazine only unless basis='total' is specified.
--- immediate skips the firing-click wait for fast weapons.
+-- immediate skips the legacy firing-click wait when Mod Options Menu is absent.
+-- The menu's configured delay applies to every rule, including immediate ones.
 -- continuous is for weapons that load individual rounds. Do not use it for AC-8.
 local tactical_rules = {
     -- AR family (JAR-5, sentries, drones and vehicle weapons excluded).

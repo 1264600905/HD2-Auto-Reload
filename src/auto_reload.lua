@@ -10,8 +10,10 @@ local DEBUG = false -- DEBUG_BUILD_FLAG
 local CONTINUOUS_RELOAD_INTERVAL_SECONDS = 0.1
 local TACTICAL_RAPID_CLICK_WINDOW_SECONDS = 0.5
 local TACTICAL_CLICK_DELAYS = {0.1, 0.2, 0.4, 0.6}
+local SPEARGUN_RESOURCE = '3828e2051aa9e897'
+local SPEARGUN_RETRY_DELAYS = {0.25, 0.5, 1.0}
 -- RELOAD_CONFIG_INSERT
-local state = {revision = DEBUG and 'auto-reload-0.6.4-debug' or 'auto-reload-0.6.4',
+local state = {revision = DEBUG and 'auto-reload-0.6.6-debug' or 'auto-reload-0.6.6',
     ticks = 0, elapsed = 0, snapshots = 0,
     latest_row = nil,
     lmb_edge_time = nil, empty_since = nil, attempted = false, identity = nil,
@@ -44,6 +46,7 @@ local function debug_emit(line)
     end
 end
 
+-- MOD_OPTIONS_INSERT
 local bit = require('bit')
 local INVALID = 0xffffffff
 -- Catalog IDs plus live local-player Wieldable/Seater observations.
@@ -672,7 +675,7 @@ local function truly_empty(row)
 end
 
 local function tactical_rule(row)
-    if not ENABLE_TACTICAL_RELOAD or not row then return nil end
+    if not reload_settings.tactical_reload or not row then return nil end
     local rule = tactical_rules[row.current_weapon_resource]
     if rule and rule.path == row.ammo_path then return rule end
 end
@@ -735,7 +738,65 @@ local function track_tactical_click()
     state.tactical_click_generation = (state.tactical_click_generation or 0) + 1
 end
 
+local function reset_reload_delay()
+    state.reload_window_since, state.reload_wait_since = nil, nil
+    state.reload_seen_click_at, state.reload_previous_count = nil, nil
+    state.reload_pending_attack, state.reload_shot_generation = nil, nil
+end
+
+local function observed_round_count(row)
+    if row.ammo_path == 'weapon_magazine' and row.magazine_verified == true and
+        type(row.magazine_count) == 'number' and type(row.magazine_chamber_token) == 'number' then
+        return row.magazine_count + (row.magazine_chamber_token ~= 0 and 1 or 0)
+    elseif row.ammo_path == 'weapon_rounds' and type(row.rounds_magazine_count) == 'number' then
+        if row.rounds_chambered == false then return row.rounds_magazine_count end
+        if row.rounds_chambered == true and type(row.rounds_chamber_token) == 'number' then
+            return row.rounds_magazine_count + (row.rounds_chamber_token ~= 0 and 1 or 0)
+        end
+    end
+end
+
+local function track_reload_delay(row, eligible)
+    if not reload_settings.configurable_timing then return end
+    if not eligible then reset_reload_delay(); return end
+    if not state.reload_window_since then
+        state.reload_window_since, state.reload_wait_since = state.elapsed, state.elapsed
+        state.reload_shot_generation = 0
+    end
+    local count = observed_round_count(row)
+    local consumed = count and state.reload_previous_count and count < state.reload_previous_count
+    state.reload_previous_count = count
+    local click = state.last_lmb_press_at
+    local new_click = click and click ~= state.reload_seen_click_at and
+        click >= state.reload_window_since and state.elapsed - click <= 0.25
+    if new_click then
+        state.reload_seen_click_at = click
+        -- Attack-only weapons still need a new press; latch it through long delays.
+        if attack_only_resources[row.current_weapon_resource] and not state.reload_pending_attack then
+            state.reload_wait_since = click
+        end
+        state.reload_pending_attack = click
+    end
+    if consumed or new_click then
+        state.reload_shot_generation = (state.reload_shot_generation or 0) + 1
+        if reload_settings.shooting_postpones then
+            state.reload_wait_since = consumed and state.elapsed or click
+            if state.speargun_retry_at then
+                state.speargun_retry_at = math.max(state.speargun_retry_at,
+                    state.reload_wait_since + reload_settings.reload_delay)
+            end
+        end
+    end
+end
+
+local function reload_delay_finished()
+    return not reload_settings.configurable_timing or
+        state.reload_wait_since ~= nil and
+        state.elapsed - state.reload_wait_since >= reload_settings.reload_delay
+end
+
 local function tactical_click_wait_finished()
+    if reload_settings.configurable_timing then return reload_delay_finished() end
     local last_click = state.tactical_last_click_at
     local since = last_click or state.tactical_window_since
     local delay = TACTICAL_CLICK_DELAYS[state.tactical_click_tier or 1]
@@ -754,11 +815,29 @@ local function fresh_context_matches(row, fresh)
         fresh.current_weapon_resource == row.current_weapon_resource
 end
 
+local function fresh_shot_postpones(row, fresh)
+    if not reload_settings.configurable_timing or not reload_settings.shooting_postpones or
+        reload_settings.reload_delay == 0 then return false end
+    local before, after = observed_round_count(row), observed_round_count(fresh)
+    if before and after and after < before and
+        (not state.reload_previous_count or after < state.reload_previous_count) then
+        state.reload_previous_count, state.reload_wait_since = after, state.elapsed
+        state.reload_shot_generation = (state.reload_shot_generation or 0) + 1
+        return true
+    end
+    return false
+end
+
+local function reset_speargun_retries()
+    state.speargun_retry_at, state.speargun_retry_count = nil, nil
+end
+
 local function reload_request(reason, expected_tactical_count)
     debug_emit(string.format('DEBUG_RELOAD_ENTER tick=%d elapsed=%.3f reason=%s resource=%s',
         state.ticks, state.elapsed, reason,
         tostring(state.latest_row and state.latest_row.current_weapon_resource)))
-    if state.attempted and reason ~= 'empty_attack' and reason ~= 'tactical_idle' and
+    if not reload_delay_finished() then return end
+    if state.attempted and reason ~= 'empty_attack' and reason ~= 'empty_retry' and reason ~= 'tactical_idle' and
         reason ~= 'tactical_last_round' and reason ~= 'tactical_zero' and reason ~= 'tactical_immediate' then
         debug_emit('DEBUG_RELOAD_SKIP reason=already_attempted')
         return
@@ -785,6 +864,7 @@ local function reload_request(reason, expected_tactical_count)
         debug_emit('DEBUG_RELOAD_SKIP reason=fresh_context_rejected')
         return
     end
+    if fresh_shot_postpones(state.latest_row, fresh) then return end
     if expected_tactical_count and
         (tactical_ammo_count(fresh, tactical_rule(fresh)) or math.huge) > expected_tactical_count then
         debug_emit('DEBUG_RELOAD_SKIP reason=last_round_changed')
@@ -803,7 +883,19 @@ local function reload_request(reason, expected_tactical_count)
         tostring(state.latest_row.magazine_chamber_token or state.latest_row.rounds_chamber_token)))
     if ok then
         state.last_request = state.elapsed
+        state.reload_pending_attack = nil
         state.attempted = true; state.request_at = state.elapsed
+        if fresh.current_weapon_resource == SPEARGUN_RESOURCE and truly_empty(fresh) then
+            -- SendInput acceptance does not confirm that the game began loading.
+            -- Retry this single-shot weapon only a finite number of times.
+            state.speargun_retry_count = reason == 'empty_retry' and
+                (state.speargun_retry_count or 0) + 1 or 0
+            local delay = SPEARGUN_RETRY_DELAYS[state.speargun_retry_count + 1]
+            if delay and reload_settings.configurable_timing then
+                delay = math.max(delay, reload_settings.reload_delay)
+            end
+            state.speargun_retry_at = delay and state.elapsed + delay or nil
+        end
     end
     return ok
 end
@@ -820,6 +912,8 @@ local function auto_reload_step()
         state.critical_one_requested = false
         state.critical_zero_requested = false
         reset_tactical_clicks()
+        reset_reload_delay()
+        reset_speargun_retries()
         return
     end
     local identity = tostring(row.current_weapon_resource) .. ':' .. tostring(row.selected_entity_id) ..
@@ -832,6 +926,8 @@ local function auto_reload_step()
         state.critical_one_requested = false
         state.critical_zero_requested = false
         reset_tactical_clicks()
+        reset_reload_delay()
+        reset_speargun_retries()
         emit('WEAPON_CONTEXT resource=' .. tostring(row.current_weapon_resource) ..
             ' entity=' .. tostring(row.selected_entity_id) .. ' policy=' .. row.ammo_path)
     end
@@ -846,12 +942,14 @@ local function auto_reload_step()
         -- A click before entry must not shorten or lengthen the new wait.
         reset_tactical_clicks()
     end
-    if not rounds_empty(row) then state.immediate_count = nil end
+    local eligible = rounds_empty(row)
+    track_reload_delay(row, eligible)
+    if not eligible then state.immediate_count = nil end
     if count ~= 1 then state.critical_one_requested = false end
     if not rule or rule.limit ~= 0 or count ~= 0 then
         state.critical_zero_requested = false
     end
-    if rounds_empty(row) then
+    if eligible then
         if not state.empty_since then
             state.empty_since = state.elapsed
             emit('EMPTY_BEGIN tick=' .. state.ticks .. ' elapsed=' .. string.format('%.3f', state.elapsed) ..
@@ -862,6 +960,13 @@ local function auto_reload_step()
         if state.request_at and state.elapsed - state.request_at >= 8 then
             emit('RELOAD_UNCONFIRMED reason=still_empty_after_8_seconds retry=press_attack')
             state.request_at = nil
+        end
+        if not reload_delay_finished() then return end
+        if row.current_weapon_resource == SPEARGUN_RESOURCE and truly_empty(row) and
+            state.speargun_retry_at and state.elapsed >= state.speargun_retry_at and
+            not (api.own_reload_active and api.own_reload_active()) then
+            reload_request('empty_retry')
+            return
         end
         local attack_only = attack_only_resources[row.current_weapon_resource] == true
         if not attack_only and rule and rule.immediate and count then
@@ -901,22 +1006,31 @@ local function auto_reload_step()
         if not attack_only and count and count > 1 and count <= rule.limit then
             -- A new shot restarts the wait. Magazine weapons request once per
             -- click interval; per-round weapons continue in continuous_reload_step.
+            local generation = reload_settings.configurable_timing and state.reload_shot_generation or
+                (state.tactical_click_generation or 0)
             if tactical_click_wait_finished() and
                 not rule.continuous and
-                state.tactical_sent_generation ~= (state.tactical_click_generation or 0) then
+                state.tactical_sent_generation ~= generation then
                 if reload_request('tactical_idle') then
-                    state.tactical_sent_generation = state.tactical_click_generation or 0
+                    state.tactical_sent_generation = generation
                 end
             end
             return
         end
-        if state.lmb_edge_time and state.elapsed - state.lmb_edge_time <= 0.25 and
+        if reload_settings.configurable_timing then
+            if state.reload_pending_attack ~= nil then
+                reload_request('empty_attack')
+            elseif not attack_only and not state.attempted then
+                reload_request('empty_immediate')
+            end
+        elseif state.lmb_edge_time and state.elapsed - state.lmb_edge_time <= 0.25 and
             state.lmb_edge_time >= state.empty_since then
             if reload_request('empty_attack') then state.lmb_edge_time = nil end
         elseif not attack_only and not state.attempted then
             reload_request('empty_immediate')
         end
     else
+        reset_speargun_retries()
         if state.request_at and row.ammo_path == 'weapon_heat' and row.heat_verified and not row.heat_overheated then
             emit('HEAT_LOCK_CLEARED_AFTER_REQUEST reload_animation_not_verified=true')
             state.request_at = nil
@@ -954,6 +1068,7 @@ local function continuous_reload_step()
         state.continuous_probe_at = nil
         return
     end
+    if not reload_delay_finished() then return end
     if count == 1 then return end
     if count and count > 1 and not rule.immediate and not tactical_click_wait_finished() then return end
     local identity = tostring(row.current_weapon_resource) .. ':' .. tostring(row.selected_entity_id) ..
@@ -975,6 +1090,7 @@ local function continuous_reload_step()
         debug_emit('DEBUG_CONTINUOUS_SKIP reason=fresh_context_rejected')
         return
     end
+    if fresh_shot_postpones(row, fresh) then return end
     debug_emit(string.format('DEBUG_CONTINUOUS_SEND_BEGIN tick=%d elapsed=%.3f',
         state.ticks, state.elapsed))
     local ok, detail = api.send_reload()
@@ -987,6 +1103,7 @@ local function continuous_reload_step()
         tostring(row.rounds_chamber_token)))
     if ok then
         state.last_request = state.elapsed
+        state.reload_pending_attack = nil
         state.attempted = true; state.request_at = state.elapsed
     end
 end
@@ -994,11 +1111,13 @@ end
 emit('START revision=' .. state.revision .. ' debug=' .. tostring(DEBUG) ..
     ' tactical_reload=' .. tostring(ENABLE_TACTICAL_RELOAD) ..
     ' reload_delay=0 heat_overheat_reload=true rounds_and_magazine=true no_native_calls=true no_memory_writes=true input_injection=true')
+sync_mod_options()
 snapshot('initial')
 
 local original_update = rawget(_G, 'update')
 local function update(dt, ...)
     state.ticks = state.ticks + 1
+    sync_mod_options()
     if setup_ok then
         state.started_at = state.started_at or api.now()
         state.elapsed = api.now() - state.started_at

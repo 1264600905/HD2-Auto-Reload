@@ -12,6 +12,7 @@ BUILD = ROOT / 'build'
 MARKER = '-- STATIC_COMPONENT_READER_INSERT'
 DEBUG_MARKER = 'local DEBUG = false -- DEBUG_BUILD_FLAG'
 CONFIG_MARKER = '-- RELOAD_CONFIG_INSERT'
+OPTIONS_MARKER = '-- MOD_OPTIONS_INSERT'
 MAPS = {
     'MAGAZINE': ROOT / 'data/WeaponMagazineComponent.25327279.map.hex',
     'ROUNDS': ROOT / 'data/WeaponRoundsComponent.25327279.map.hex',
@@ -76,7 +77,7 @@ def main():
     parser.add_argument('--game-dir', type=Path, help='Optional local game directory for SHA256 verification')
     parser.add_argument('--debug', action='store_true', help='Build a diagnostic package with reload trace logging')
     parser.add_argument('--enable-tactical-reload', action='store_true',
-                        help='启用战术换弹 in the built package; no in-game setting')
+                        help='Default to tactical reload; Mod Options Menu can change this in game')
     args = parser.parse_args()
     supported_hashes = {
         ('73374bd4e38386beb9a23bef480082b67d457ebc77485fbec5f488b4e95e201f',
@@ -97,25 +98,26 @@ def main():
             r'^(local ENABLE_TACTICAL_RELOAD = )(?:true|false)( -- 启用战术换弹)$',
             r'\g<1>true\g<2>', reload_config, count=1, flags=re.M)
     if (source.count(MARKER) != 1 or source.count(DEBUG_MARKER) != 1 or
-            source.count(CONFIG_MARKER) != 1):
+            source.count(CONFIG_MARKER) != 1 or source.count(OPTIONS_MARKER) != 1):
         raise SystemExit('source build marker missing or duplicated')
     insertion = INSERT
     for name, path in MAPS.items():
         insertion = insertion.replace('__' + name + '_MAP__', bytes.fromhex(path.read_text()).hex())
     generated = source.replace(MARKER, insertion).replace(
         CONFIG_MARKER, reload_config).replace(
+        OPTIONS_MARKER, (ROOT / 'src/mod_options.lua').read_text(encoding='utf-8')).replace(
         DEBUG_MARKER, 'local DEBUG = ' + str(args.debug).lower() + ' -- DEBUG_BUILD_FLAG')
     BUILD.mkdir(parents=True, exist_ok=True)
     suffix = ('-tactical' if args.enable_tactical_reload else '') + ('-debug' if args.debug else '')
     entry = BUILD / ('auto_reload_entry' + suffix.replace('-', '_') + '.lua')
     entry.write_text(generated, encoding='utf-8', newline='\n')
     prefix = '[战术换弹]' if args.enable_tactical_reload else '[普通换弹]'
-    output = BUILD / (prefix + 'Auto-Reload-v0.6.4' + suffix + '.zip')
+    output = BUILD / (prefix + 'Auto-Reload-v0.6.6' + suffix + '.zip')
     build_addon('mods/liu/auto_reload_rounds', generated.encode('utf-8'),
                 '4df5aee3-3c5d-47fc-b0e9-0a40f7988738', output,
-                'Auto Reload v0.6.4' + (' tactical' if args.enable_tactical_reload else '') +
+                'Auto Reload v0.6.6' + (' tactical' if args.enable_tactical_reload else '') +
                 (' Debug' if args.debug else '') +
-                ' (immediate; Heat; builds 25327279/25480438)')
+                ' (Mod Options Menu; Heat; builds 25327279/25480438)')
     print('Built', output)
 
 if __name__ == '__main__':

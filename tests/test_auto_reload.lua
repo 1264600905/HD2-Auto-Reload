@@ -7,7 +7,7 @@ local input_code = assert(source:match('(local function input_probe%(%).-)\nloca
 local controller = assert(generated:match('(local function truly_empty.-)\nemit%(%\'START'))
 local policies = assert(generated:match('(local CONTINUOUS_RELOAD_INTERVAL_SECONDS =.-)\nlocal state ='))
 local tests = 0
-local function scenario(tactical_enabled)
+local function scenario(tactical_enabled, settings)
     local row = {context_status='context_observed', ammo_path='weapon_rounds',
         current_weapon_resource='safe', selected_entity_id=1, weapon_owned=true,
         rounds_magazine_count=0, rounds_chambered=false}
@@ -34,13 +34,14 @@ local function scenario(tactical_enabled)
     end
     local factory = assert(loadstring(selected_policies .. '\n' .. controller ..
         '\n' .. input_code .. '\nreturn auto_reload_step, rounds_empty, continuous_reload_step, input_probe'))
-    setfenv(factory, setmetatable({RELOAD_DELAY_SECONDS=1, state=state, api=api,
+    settings = settings or {tactical_reload=tactical_enabled == true, configurable_timing=false}
+    setfenv(factory, setmetatable({reload_settings=settings, state=state, api=api,
         bit=require('bit'), unsafe_resources={unsafe=true},
         context_reader=function() return fresh end,
         emit=function(s) logs[#logs+1]=s end, debug_emit=function() end,
         scalar=tostring}, {__index=_G}))
     local step, empty, continuous, probe = factory()
-    return {row=row, state=state, logs=logs, empty=empty,
+    return {row=row, state=state, settings=settings, logs=logs, empty=empty,
         probe=function(t, r) state.elapsed=t; raw_keys[0x52]=r and -32768 or 0; probe() end, sent=function() return sent end,
         fresh=function(value) fresh=value end, focus=function(value) focused=value end,
         own_key=function(value) own_down=value end,
@@ -56,6 +57,79 @@ test('empty reload sends immediately and only once', function()
     local s=scenario(); s.step(0); assert(s.sent()==1); s.step(.99); assert(s.sent()==1)
     s.step(1); s.step(7); assert(s.sent()==1)
 end)
+local function empty_speargun(tactical_enabled)
+    local s=scenario(tactical_enabled)
+    s.row.current_weapon_resource='3828e2051aa9e897'
+    s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
+    s.row.magazine_count=0; s.row.magazine_chamber_token=0
+    return s
+end
+
+test('Speargun retries an accepted but unexecuted reload at bounded intervals', function()
+    for _,tactical in ipairs({false,true}) do
+        local s=empty_speargun(tactical)
+        s.step(0); assert(s.sent()==1)
+        s.step(.249); assert(s.sent()==1)
+        s.step(.25); assert(s.sent()==2)
+        s.step(.749); assert(s.sent()==2)
+        s.step(.75); assert(s.sent()==3)
+        s.step(1.749); assert(s.sent()==3)
+        s.step(1.75); assert(s.sent()==4)
+        s.step(8); s.step(30); assert(s.sent()==4)
+        assert(s.state.speargun_retry_count==3 and not s.state.speargun_retry_at)
+        assert(table.concat(s.logs,'\n'):find('reason=empty_retry',1,true))
+        s.click(31); s.step(31); assert(s.sent()==5)
+        assert(s.state.speargun_retry_count==0)
+    end
+end)
+
+test('Speargun refill or a ready chamber cancels retries and rearms the next shot', function()
+    for _,field in ipairs({'magazine_count','magazine_chamber_token'}) do
+        local s=empty_speargun(); s.step(0); assert(s.sent()==1)
+        s.row[field]=1; s.step(.25); s.step(2); assert(s.sent()==1)
+        assert(not s.state.speargun_retry_at)
+        s.row[field]=0; s.step(3); assert(s.sent()==2)
+        s.step(3.25); assert(s.sent()==3)
+    end
+end)
+
+test('Speargun retry rechecks fresh ammo and selection before input', function()
+    for _,mode in ipairs({'refill','entity','slot','missing','seat'}) do
+        local s=empty_speargun(); s.step(0)
+        local fresh={}; for k,v in pairs(s.row) do fresh[k]=v end
+        if mode=='refill' then fresh.magazine_count=1
+        elseif mode=='entity' then fresh.selected_entity_id=2
+        elseif mode=='slot' then fresh.selected_slot=2
+        elseif mode=='seat' then fresh.weapon_context='vehicle' end
+        if mode=='missing' then s.fresh(nil) else s.fresh(fresh) end
+        s.step(.25); assert(s.sent()==1)
+        assert(s.state.speargun_retry_count==0)
+        s.fresh(s.row); s.step(.3); assert(s.sent()==2)
+    end
+end)
+
+test('Speargun retries defer held keys and rejected sends without consuming attempts', function()
+    local s=empty_speargun(); s.step(0)
+    s.own_key(true); s.step(.25); assert(s.sent()==1)
+    s.own_key(false); s.allow_send(false); s.step(.3); assert(s.sent()==1)
+    assert(s.state.speargun_retry_count==0 and s.state.speargun_retry_at==.25)
+    s.allow_send(true); s.step(.31); assert(s.sent()==2)
+    assert(s.state.speargun_retry_count==1)
+end)
+
+test('Speargun focus loss and weapon changes discard pending retries', function()
+    for _,mode in ipairs({'focus','resource','entity','unverified','ownership'}) do
+        local s=empty_speargun(); s.step(0)
+        if mode=='focus' then s.focus(false)
+        elseif mode=='resource' then s.row.current_weapon_resource='other'; s.row.magazine_count=1
+        elseif mode=='entity' then s.row.selected_entity_id=2; s.row.magazine_count=1
+        elseif mode=='unverified' then s.row.magazine_verified=false
+        elseif mode=='ownership' then s.row.weapon_owned=false end
+        s.step(.25); assert(s.sent()==1)
+        assert(not s.state.speargun_retry_at)
+    end
+end)
+
 test('AMR waits for zero magazine rounds', function()
     local s=scenario(true); s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
     s.row.magazine_chamber_token=40
@@ -604,6 +678,207 @@ end)
 test('new weapon is not delayed by previous weapons request', function()
     local s=scenario(); s.step(0); assert(s.sent()==1)
     s.row.selected_entity_id=2; s.step(.01); assert(s.sent()==2)
+end)
+
+local function configured_scenario(tactical, delay, postpones)
+    return scenario(tactical, {tactical_reload=tactical == true, reload_delay=delay or 0,
+        shooting_postpones=postpones ~= false, configurable_timing=true})
+end
+
+local function configured_magazine(resource, count, delay, postpones)
+    local s=configured_scenario(true, delay, postpones)
+    s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
+    s.row.magazine_chamber_token=0; s.row.magazine_count=count
+    s.row.current_weapon_resource=resource
+    return s
+end
+
+test('menu delay covers ordinary empty, burned heat and every tactical priority', function()
+    local cases={configured_scenario(false, .5),
+        configured_magazine('84354339522c932d', 3, .5), -- immediate fast rule
+        configured_magazine('89c5493e08ca4207', 0, .5), -- zero-limit rule
+        configured_magazine('timing_fixture', 1, .5), -- last round
+        configured_magazine('timing_fixture', 8, .5), -- legacy idle wait
+        configured_magazine('1fa1f596769225c2', 0, .5)} -- vehicle cannon
+    local heat=configured_scenario(false,.5); heat.row.ammo_path='weapon_heat'
+    heat.row.heat_verified=true; heat.row.heat_requires_replacement=true; heat.row.heat_overheated=true
+    cases[#cases+1]=heat
+    for _,s in ipairs(cases) do
+        s.step(0); s.step(.499); assert(s.sent()==0)
+        s.step(.501); assert(s.sent()==1, s.row.current_weapon_resource)
+        s.step(.8); assert(s.sent()==1)
+    end
+end)
+
+test('zero menu delay removes legacy click waits for all tactical rules', function()
+    for _,count in ipairs({0,1,8}) do
+        local s=configured_magazine('timing_fixture',count,0)
+        s.click(0); s.step(0); assert(s.sent()==1)
+    end
+    local s=configured_scenario(true,0); s.row.current_weapon_resource='41eac4a03987faa0'
+    s.row.rounds_magazine_count=8; s.continuous_step(0); assert(s.sent()==1)
+end)
+
+test('maximum menu delay waits five seconds and preserves a standing attack', function()
+    for _,standing in ipairs({false,true}) do
+        local s=standing and configured_magazine('9f80d67a12a7e40f',0,5) or configured_scenario(false,5)
+        s.step(0)
+        if standing then s.click(1); s.step(1) end
+        local deadline=standing and 6 or 5
+        s.step(deadline-.001); assert(s.sent()==0)
+        s.step(deadline+.001); assert(s.sent()==1)
+    end
+end)
+
+test('shooting postpones from each click with the selected delay and no escalation', function()
+    local s=configured_magazine('timing_fixture',8,.5)
+    s.click(0); s.step(0); s.click(.2); s.step(.2); s.click(.4); s.step(.4)
+    s.step(.899); assert(s.sent()==0); s.step(.901); assert(s.sent()==1)
+    s.click(1); s.step(1); s.step(1.499); assert(s.sent()==1)
+    s.step(1.501); assert(s.sent()==2)
+end)
+
+test('held automatic fire postpones on ammo consumption without another mouse edge', function()
+    local s=configured_magazine('a6a735accb4a327f',10,.5)
+    s.state.keys.LMB=true; s.step(0)
+    s.row.magazine_count=9; s.step(.2)
+    s.row.magazine_count=8; s.step(.4)
+    s.step(.899); assert(s.sent()==0); s.step(.901); assert(s.sent()==1)
+    s.row.magazine_count=7; s.step(1); s.step(1.499); assert(s.sent()==1)
+    s.step(1.501); assert(s.sent()==2)
+end)
+
+test('disabled shooting postponement keeps the original deadline during fire', function()
+    for _,resource in ipairs({'timing_fixture','84354339522c932d'}) do
+        local s=configured_magazine(resource,resource=='timing_fixture' and 8 or 3,.5,false)
+        s.step(0); s.click(.3); s.row.magazine_count=s.row.magazine_count-1; s.step(.3)
+        s.click(.49); s.step(.49); assert(s.sent()==0)
+        s.step(.501); assert(s.sent()==1)
+    end
+end)
+
+test('continuous loading respects shooting delay but keeps its loading interval', function()
+    for _,postpones in ipairs({true,false}) do
+        local s=configured_scenario(true,.5,postpones)
+        s.row.current_weapon_resource='41eac4a03987faa0'; s.row.rounds_magazine_count=8
+        s.continuous_step(0); s.row.rounds_magazine_count=7; s.continuous_step(.3)
+        s.continuous_step(.501); assert(s.sent()==(postpones and 0 or 1))
+        if postpones then
+            s.continuous_step(.799); assert(s.sent()==0)
+            s.continuous_step(.801); assert(s.sent()==1)
+            s.continuous_step(.85); assert(s.sent()==1)
+            s.continuous_step(.902); assert(s.sent()==2)
+        end
+    end
+end)
+
+test('standing reload latches a fresh empty attack through delays over 0.25 seconds', function()
+    for _,postpones in ipairs({true,false}) do
+        local s=configured_magazine('9f80d67a12a7e40f',0,.5,postpones)
+        s.step(0); s.step(2); assert(s.sent()==0)
+        s.click(3); s.step(3); s.step(3.499); assert(s.sent()==0)
+        s.step(3.501); assert(s.sent()==1)
+        s.step(4); assert(s.sent()==1)
+        s.click(5); s.step(5); assert(s.sent()==1)
+        s.step(5.501); assert(s.sent()==2)
+    end
+end)
+
+test('disabled postponement does not restart a pending standing reload on extra clicks', function()
+    local s=configured_magazine('11c27d3babb38956',0,.5,false)
+    s.step(0); s.click(2); s.step(2); s.click(2.4); s.step(2.4)
+    s.step(2.501); assert(s.sent()==1)
+end)
+
+test('refills, weapon swaps and focus loss start a new complete menu delay', function()
+    for _,mode in ipairs({'refill','weapon','focus'}) do
+        local s=configured_scenario(false,.5); s.step(0)
+        if mode=='refill' then s.row.rounds_magazine_count=1
+        elseif mode=='weapon' then s.row.selected_entity_id=2
+        else s.focus(false) end
+        s.step(.3)
+        s.row.rounds_magazine_count=0; s.focus(true); s.step(.4)
+        s.step(.799); assert(s.sent()==0)
+        s.step(.901); assert(s.sent()==1)
+    end
+end)
+
+test('shots before the reload threshold do not shorten or extend the menu delay', function()
+    local s=configured_magazine('84354339522c932d',4,.5)
+    s.click(0); s.step(0); s.click(.2); s.step(.2)
+    s.row.magazine_count=3; s.step(.3); s.step(.799); assert(s.sent()==0)
+    s.step(.801); assert(s.sent()==1)
+end)
+
+test('fresh ammo consumption postpones a request detected at its deadline', function()
+    for _,continuous in ipairs({false,true}) do
+        local s=continuous and configured_scenario(true,.5) or
+            configured_magazine('84354339522c932d',3,.5)
+        if continuous then s.row.current_weapon_resource='41eac4a03987faa0'; s.row.rounds_magazine_count=8 end
+        local step=continuous and s.continuous_step or s.step
+        local field=continuous and 'rounds_magazine_count' or 'magazine_count'
+        step(0)
+        local fresh={}; for k,v in pairs(s.row) do fresh[k]=v end
+        fresh[field]=fresh[field]-1; s.fresh(fresh); step(.501); assert(s.sent()==0)
+        s.row[field]=fresh[field]; s.fresh(s.row); step(.8); assert(s.sent()==0)
+        step(1.002); assert(s.sent()==1)
+    end
+end)
+
+test('configured Speargun retries stay bounded and respect the selected delay', function()
+    local s=configured_magazine('3828e2051aa9e897',0,.5)
+    s.step(0); s.step(.501); assert(s.sent()==1)
+    s.step(.9); assert(s.sent()==1); s.step(1.002); assert(s.sent()==2)
+    s.step(1.503); assert(s.sent()==3); s.step(2.504); assert(s.sent()==4)
+    s.step(20); assert(s.sent()==4)
+end)
+
+test('a dry fire click postpones a queued Speargun retry', function()
+    local s=configured_magazine('3828e2051aa9e897',0,.5)
+    s.step(0); s.step(.501); assert(s.sent()==1)
+    s.click(.9); s.step(.9); s.step(1.399); assert(s.sent()==1)
+    s.step(1.401); assert(s.sent()==2)
+end)
+
+test('configured reloads still recheck identity and fresh ammo before sending', function()
+    for _,mode in ipairs({'refill','entity','missing'}) do
+        local s=configured_scenario(false,.5); s.step(0)
+        local fresh={}; for k,v in pairs(s.row) do fresh[k]=v end
+        if mode=='refill' then fresh.rounds_magazine_count=1
+        elseif mode=='entity' then fresh.selected_entity_id=2 end
+        if mode=='missing' then s.fresh(nil) else s.fresh(fresh) end
+        s.step(.501); assert(s.sent()==0)
+    end
+end)
+
+test('menu tactical toggle changes both threshold and continuous eligibility', function()
+    local s=configured_magazine('84354339522c932d',3,0)
+    s.settings.tactical_reload=false; s.step(0); assert(s.sent()==0)
+    s.settings.tactical_reload=true; s.step(.1); assert(s.sent()==1)
+    local c=configured_scenario(false,0); c.row.current_weapon_resource='41eac4a03987faa0'
+    c.row.rounds_magazine_count=8; c.continuous_step(0); assert(c.sent()==0)
+    c.settings.tactical_reload=true; c.continuous_step(.1); assert(c.sent()==1)
+    c.settings.tactical_reload=false; c.continuous_step(.3); assert(c.sent()==1)
+end)
+
+test('MG206 never requests at 70 rounds or during a loaded-chamber magazine replacement', function()
+    for _,resource in ipairs({'2152d5147b0ac418','cd00bdc1149c2928'}) do
+        for _,tactical in ipairs({true,false}) do
+            for _,menu in ipairs({true,false}) do
+                local s=menu and configured_scenario(tactical,.2) or scenario(tactical)
+                s.row.current_weapon_resource=resource; s.row.ammo_path='weapon_magazine'
+                s.row.magazine_verified=true; s.row.magazine_chamber_token=275
+                for index,count in ipairs({100,77,75,70,65,0}) do
+                    s.row.magazine_count=count; s.click(index); s.step(index); s.step(index+.25)
+                    assert(s.sent()==0,resource..' rounds='..count)
+                end
+                s.row.magazine_chamber_token=0; s.step(7); s.step(8); assert(s.sent()==0)
+                s.click(8.1); s.step(8.1)
+                if menu then assert(s.sent()==0); s.step(8.301) end
+                assert(s.sent()==1)
+            end
+        end
+    end
 end)
 
 test('scan-code press spans frames and failed keyup is retried', function()
