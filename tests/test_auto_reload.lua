@@ -29,12 +29,6 @@ local function scenario(tactical_enabled, settings)
     -- production policy, which now correctly requires an empty magazine.
     selected_policies = selected_policies:gsub('local tactical_rules = {',
         "local tactical_rules = {\n    ['timing_fixture'] = {name='test timing', path='weapon_magazine', limit=8},", 1)
-    if tactical_enabled then
-        local count
-        selected_policies, count = selected_policies:gsub('local ENABLE_TACTICAL_RELOAD = false',
-            'local ENABLE_TACTICAL_RELOAD = true')
-        assert(count == 1)
-    end
     local factory = assert(loadstring(selected_policies .. '\n' .. controller ..
         '\n' .. input_code .. '\nreturn auto_reload_step, rounds_empty, continuous_reload_step, input_probe'))
     settings = settings or {tactical_reload=tactical_enabled == true, configurable_timing=false}

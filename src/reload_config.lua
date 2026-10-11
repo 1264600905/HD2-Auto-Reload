@@ -1,6 +1,6 @@
 -- Build-time defaults and weapon rules. Mod Options Menu can override the switch.
 -- Without the menu, false keeps ordinary empty reloads; true enables these limits.
-local ENABLE_TACTICAL_RELOAD = false -- 启用战术换弹
+local ENABLE_TACTICAL_RELOAD = true -- 启用战术换弹
 
 -- Keys are exact resource IDs for held or verified selected vehicle weapons.
 -- limit counts the selected magazine only unless basis='total' is specified.

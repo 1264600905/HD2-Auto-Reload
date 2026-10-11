@@ -7,11 +7,12 @@ Helldivers 2 自动换弹 Mod，依赖 **Bingus Shared Loader v15+ / API 1**。
 
 ## 本地版 v0.6.8
 
-战术版安装包为 `build/[战术换弹]Auto-Reload-v0.6.8-tactical.zip`，配套菜单为 `ModOptionsMenu-main/releases/Mod-Options-Menu-v1.3.zip`。替换各自旧包，部署后重启游戏，只保留各一份。默认推荐非诊断包。
+唯一安装包为 `build/Auto-Reload-v0.6.8.zip`，内含自动换弹和 Mod Options Menu v1.3。替换旧自动换弹包，停用旧单独菜单包，保留 Bingus Shared Loader，部署后重启游戏。首次默认战术开启、日志关闭，已有保存值优先。
 
 - 22 个整弹匣武器统一在弹匣剩 1 发时战术换弹；逐发武器原阈值仍是默认值。
 - 换弹延迟固定为 0，删除延迟滑块与连续射击/点击等待。
 - **战术换弹/Tactical Reload** 是战术总开关，关闭后仍保留打空自动换弹。
+- **日志打印/Logging** 独立显示，默认关闭；关闭时停止自动换弹日志写入和打印，切换时不会重置换弹。
 - 开启战术换弹后显示 **换弹不阻止开火/Reload Does Not Block Firing**、**逐发换弹武器换弹阈值/Per-round Reload Threshold** 和 **AC-8机炮换弹阈值/AC-8 Reload Threshold**。
 - 逐发模式：默认/Default、最后一发/Last Round、第一发/First Shot。AC-8 模式：1发战术换弹/Tactical at 1 Round、5发战术换弹/Tactical at 5 Rounds、不战术换弹/No Tactical Reload。
 - “换弹不阻止开火”只沿用旧选项的名字与保存值，不控制主动松左键。非站桩手持武器仍默认先松左键并在同一次更新内发送 R，无松键开关；换弹后需重新按下开火。
@@ -69,28 +70,18 @@ Python 3.10+，仅使用标准库，无需下载或安装其他项目：
 
 ```powershell
 python scripts/build.py
-# 构建默认启用战术换弹的安装包；安装菜单后两种包都可切换
-python scripts/build.py --enable-tactical-reload
 # 可选：对本地游戏执行完整 SHA256 校验
 python scripts/build.py --game-dir '你的 Steam 游戏目录/Helldivers 2'
 ```
 
-当前本地默认产物为 `build/[普通换弹]Auto-Reload-v0.6.8.zip`；加 `--enable-tactical-reload` 会生成 `build/[战术换弹]Auto-Reload-v0.6.8-tactical.zip`。普通和普通诊断包均加 `[普通换弹]` 前缀，战术和战术诊断包均加 `[战术换弹]` 前缀。二者沿用同一 GUID，只能部署其中一份。`build/` 不纳入源码提交。
-安装 Mod Options Menu 后，两种包都支持全部三个设置；已有保存值优先于包的默认值。没有菜单且需要提前换弹时请选择 **`build/[战术换弹]Auto-Reload-v0.6.8-tactical.zip`**。
-
-构建默认值也可在 [换弹配置](src/reload_config.lua) 中将 `ENABLE_TACTICAL_RELOAD` 设为 `true`。武器阈值仍为静态配置，修改后须重新构建、部署并重启游戏。菜单设置在应用后生效，无需重新构建。
+构建始终输出 `build/Auto-Reload-v0.6.8.zip`。普通、战术、诊断行为由游戏内开关切换，不再生成不同包。构建使用相邻 `ModOptionsMenu-main` 的 v1.3 源码；可通过 `--menu-source` 指定位置。菜单修改补丁保存在 `integrations/ModOptionsMenu-v1.3-conditional.patch`。
 
 当前规则与选项见 [v0.6.8 菜单说明](docs/MOD_OPTIONS_0.6.8.md)。所有首次请求均零延迟；即时复核、武器身份和自有 R 释放约束仍保留。系统接受输入不代表游戏完成换弹。
 
 组件 map 以十六进制文本保存在 `data/`，构建时嵌入 Lua；运行时验证完整指纹、资源记录和实体身份。
 游戏内还会验证 DLL PE 标识，以及玩家、实体、物品栏、Rounds、Magazine 和 Heat 的已核对指令片段。v5 使用新版 Magazine/Rounds/Heat 全表指纹和定点槽位。
 
-排查空仓附近闪退时可构建 `python scripts/build.py --debug`，产物为
-`build/[普通换弹]Auto-Reload-v0.6.8-debug.zip`；默认启用战术规则时加 `--enable-tactical-reload`，使用 `build/[战术换弹]Auto-Reload-v0.6.6-tactical-debug.zip`。调试包沿用同一 GUID，应替换普通版并重启游戏。
-日志的 `START` 行会显示 `revision=auto-reload-0.6.8-debug debug=true`；
-`DEBUG_SNAPSHOT_*`、`DEBUG_AUTO_STEP_*`、`DEBUG_RELOAD_*` 和 `DEBUG_SENDINPUT_*`
-会在接近空仓及请求换弹时记录调用边界。
-日志仍位于 `%LOCALAPPDATA%/CowboyBingus/Helldivers2/Logs/AutoReloadRounds.log`。
+需要排查时，在游戏 `MODS → 自动换弹/Auto Reload` 中开启 **日志打印/Logging** 并 APPLY。日志仍位于 `%LOCALAPPDATA%/CowboyBingus/Helldivers2/Logs/AutoReloadRounds.log`，启用行含 `LOGGING_ENABLED revision=auto-reload-0.6.8`。关闭后不继续写入该文件。
 
 ## 测试
 

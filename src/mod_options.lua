@@ -4,12 +4,16 @@ local reload_settings = {
     shooting_postpones = true, -- Existing saved preference; renamed only.
     per_round_threshold = 1,
     ac8_threshold = 1,
+    logging = false,
 }
 local TACTICAL_OPTION = 'liu.auto_reload.tactical_reload'
 local reload_options = {
     {key='tactical_reload', id=TACTICAL_OPTION, spec={
         type='toggle', label='战术换弹/Tactical Reload', default=ENABLE_TACTICAL_RELOAD,
         description='开启后使用战术阈值；关闭后仍保留打空自动换弹。/ Enables tactical thresholds; empty reload remains active when off.'}},
+    {key='logging', id='liu.auto_reload.logging', spec={
+        type='toggle', label='日志打印/Logging', default=false,
+        description='开启后记录输入、弹药与换弹诊断；关闭后停止本模组日志输出。/ Records input, ammo and reload diagnostics when enabled; disables this mod logging when off.'}},
     {key='shooting_postpones', id='liu.auto_reload.shooting_postpones', spec={
         type='toggle', label='换弹不阻止开火/Reload Does Not Block Firing', default=true,
         visible_if=TACTICAL_OPTION,
@@ -47,7 +51,7 @@ local function sync_mod_options()
     local menu = rawget(_G, 'ModOptionsMenu')
     if type(menu) ~= 'table' or menu.api ~= 1 or
         type(menu.register_option) ~= 'function' or type(menu.get) ~= 'function' then return end
-    local changed = false
+    local changed, logging_changed = false, false
     if menu ~= options_menu then
         options_menu, registered_options = menu, {}
         for _, option in ipairs(reload_options) do
@@ -70,12 +74,15 @@ local function sync_mod_options()
                 option.spec.type == 'choice' and type(value) == 'number' and value % 1 == 0 and
                 value >= 1 and value <= #option.spec.choices
             if ok and valid and reload_settings[option.key] ~= value then
-                reload_settings[option.key], changed = value, true
+                reload_settings[option.key] = value
+                if option.key == 'logging' then logging_changed = true else changed = true end
             end
         end
     end
+    DEBUG = reload_settings.logging
     if changed then reset_reload_settings_state() end
-    if changed or not state.options_logged then
+    if logging_changed and DEBUG then emit('LOGGING_ENABLED revision=' .. state.revision) end
+    if changed or logging_changed or not state.options_logged then
         state.options_logged = true
         emit('OPTIONS_APPLIED tactical_reload=' .. tostring(reload_settings.tactical_reload) ..
             ' reload_delay=0' ..

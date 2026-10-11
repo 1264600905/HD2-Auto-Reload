@@ -6,13 +6,13 @@
 local existing = rawget(_G, 'LiuAutoReloadRounds')
 if existing then return existing end
 
-local DEBUG = false -- DEBUG_BUILD_FLAG
+local DEBUG = false -- Controlled by the in-game logging option.
 local CONTINUOUS_RELOAD_INTERVAL_SECONDS = 0
 local SPEARGUN_RESOURCE = '3828e2051aa9e897'
 local SPEARGUN_RETRY_DELAYS = {0.25, 0.5, 1.0}
 local INTERRUPTED_RETRY_DELAYS = {1.0, 2.0}
 -- RELOAD_CONFIG_INSERT
-local state = {revision = DEBUG and 'auto-reload-0.6.8-debug' or 'auto-reload-0.6.8',
+local state = {revision = 'auto-reload-0.6.8',
     ticks = 0, elapsed = 0, snapshots = 0,
     latest_row = nil,
     lmb_edge_time = nil, empty_since = nil, attempted = false, identity = nil,
@@ -24,12 +24,16 @@ rawset(_G, 'LiuAutoReloadRounds', state)
 
 local logger = rawget(_G, 'CowboyBingusModLoader')
 local file
-if logger and logger.open_log then
-    local ok, result = pcall(logger.open_log, 'AutoReloadRounds.log')
-    if ok then file = result end
+local function ensure_log()
+    if not file and logger and logger.open_log then
+        local ok, result = pcall(logger.open_log, 'AutoReloadRounds.log')
+        if ok then file = result end
+    end
 end
 
 local function emit(line)
+    if not DEBUG then return end
+    ensure_log()
     print('[AutoReload] ' .. line)
     if file then
         pcall(function() file:write(line .. '\n'); file:flush() end)
@@ -38,6 +42,7 @@ end
 
 local function debug_emit(line)
     if not DEBUG then return end
+    ensure_log()
     if file then
         pcall(function() file:write(line .. '\n'); file:flush() end)
     else
@@ -557,6 +562,7 @@ local function scalar(value)
 end
 
 local function log_row(row, error_message, phase)
+    if not DEBUG then return end
     if error_message then
         emit(string.format('CTX_ERROR tick=%d elapsed=%.3f phase=%s error=%s',
             state.ticks, state.elapsed, phase or 'snapshot', scalar(error_message)))

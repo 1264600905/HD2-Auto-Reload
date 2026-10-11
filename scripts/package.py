@@ -26,7 +26,7 @@ def resource_hash(name):
     return value ^ (value >> 47)
 
 
-def build_addon(name, source, guid, output, display_name):
+def lua_body(name, source):
     if not re.fullmatch(r'mods/[A-Za-z0-9_]+/[A-Za-z0-9_/]+', name):
         raise ValueError('Invalid addon resource name')
     source.decode('utf-8')
@@ -38,22 +38,42 @@ def build_addon(name, source, guid, output, display_name):
         if not sep or first.rstrip(b'\r') != marker:
             raise ValueError('Addon declaration mismatch')
     body = marker + b'\n' + source
-    payload = struct.pack('<II', len(body), 2) + body
-    offset = 192  # 104-byte header/type plus one 80-byte entry, aligned to 16.
-    total = (offset + len(payload) + 15) & ~15
-    header = struct.pack('<III20sQQ24s', 0xF0000011, 1, 1, b'', total, 0, b'')
-    types = struct.pack('<IIQIIII', 0, 0, LUA_TYPE, 1, 0, 16, 16)
-    entry = struct.pack('<7Q6I', resource_hash(name), LUA_TYPE, offset, 0, 0, 0, 0,
-                        len(payload), 0, 0, 16, 16, 0)
-    archive = (header + types + entry).ljust(offset, b'\0') + payload
-    archive = archive.ljust(total, b'\0')
-    description = 'Requires Bingus Shared Loader v15+ / API 1. Enable both and deploy.'
+    return struct.pack('<II', len(body), 2) + body
+
+
+def build_addon(name, source, guid, output, display_name, extra_resources=None, extra_files=None):
+    sources = {name: source}
+    for key, value in (extra_resources or {}).items():
+        if key in sources:
+            raise ValueError('Duplicate resource name')
+        sources[key] = value
+    resources = sorted((resource_hash(key), lua_body(key, value)) for key, value in sources.items())
+    count = len(resources)
+    if len({key for key, _ in resources}) != count:
+        raise ValueError('Resource hash collision')
+    offset = (104 + 80 * count + 15) & ~15
+    data_start, entries, payloads = offset, [], bytearray()
+    for key, payload in resources:
+        entries.append(struct.pack('<7Q6I', key, LUA_TYPE, offset, 0, 0, 0, 0,
+                                   len(payload), 0, 0, 16, 16, 0))
+        payloads.extend(payload)
+        padding = (-(offset + len(payload))) % 16
+        payloads.extend(b'\0' * padding)
+        offset += len(payload) + padding
+    header = struct.pack('<III20sQQ24s', 0xF0000011, 1, count, b'', offset, 0, b'')
+    types = struct.pack('<IIQIIII', 0, 0, LUA_TYPE, count, 0, 16, 16)
+    archive = (header + types + b''.join(entries)).ljust(data_start, b'\0') + payloads
+    description = 'Requires Bingus Shared Loader v18+ / API 1. Mod Options Menu is bundled. Enable and deploy.'
     manifest = {'Version': 1, 'Guid': str(uuid.UUID(guid)), 'Name': display_name,
                 'Description': description, 'Options': [{'Name': display_name,
                 'Description': description, 'Include': ['Addon']}]}
     files = {'manifest.json': (json.dumps(manifest, indent=2) + '\n').encode(),
              'Addon/' + ARCHIVE: archive, 'Addon/' + ARCHIVE + '.stream': b'',
              'Addon/' + ARCHIVE + '.gpu_resources': b''}
+    for key, value in (extra_files or {}).items():
+        if key in files or key.startswith(('/', '\\')) or '..' in Path(key).parts:
+            raise ValueError('Invalid extra package file')
+        files[key] = value
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(output, 'w') as package:

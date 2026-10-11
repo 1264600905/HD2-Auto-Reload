@@ -6,9 +6,10 @@ local S='liu.auto_reload.shooting_postpones'
 local P='liu.auto_reload.per_round_threshold'
 local A='liu.auto_reload.ac8_threshold'
 local D='liu.auto_reload.reload_delay'
+local L='liu.auto_reload.logging'
 local function binding(tactical,menu)
     local globals={ModOptionsMenu=menu}
-    local state={identity='old',attempted=true,empty_since=1,attack_interrupted=true,
+    local state={revision='auto-reload-0.6.8',identity='old',attempted=true,empty_since=1,attack_interrupted=true,
         interrupted_retry_at=2,speargun_retry_at=3,continuous_identity='old'}
     local logs={}
     local factory=assert(loadstring(source..'\nreturn sync_mod_options,reload_settings'))
@@ -33,15 +34,16 @@ test('without a menu timing stays immediate and tactical defaults stay intact',f
         assert(b.settings.per_round_threshold==1 and b.settings.ac8_threshold==1 and #b.logs==0)
     end
 end)
-test('four bilingual options register once; delay is removed and tactical children are conditional',function()
+test('five bilingual options register once; logging is independent and tactical children are conditional',function()
     local menu=mock();local b=binding(false,menu);b.sync();b.sync()
-    assert(menu.calls==4 and menu.specs[D]==nil and #b.logs==1)
+    assert(menu.calls==5 and menu.specs[D]==nil and #b.logs==1)
+    assert(menu.specs[L].visible_if==nil and menu.specs[L].default==false)
     assert(menu.specs[T].visible_if==nil and menu.specs[T].type=='toggle')
     assert(menu.specs[P].type=='choice' and menu.specs[A].type=='choice')
     assert(menu.specs[S].label=='换弹不阻止开火/Reload Does Not Block Firing')
     for id,spec in pairs(menu.specs) do
         assert(spec.label:find('/',1,true) and spec.mod=='自动换弹/Auto Reload')
-        if id~=T then assert(spec.visible_if==T) end
+        if id~=T and id~=L then assert(spec.visible_if==T) end
         for _,choice in ipairs(spec.choices or {}) do assert(choice:find('/',1,true)) end
     end
 end)
@@ -65,11 +67,36 @@ test('only applied values reset controller state and choices are validated',func
 end)
 test('late menus, refused registrations and older menus preserve safe defaults',function()
     local b=binding(false);b.sync();local menu=mock();b.globals.ModOptionsMenu=menu;b.sync()
-    assert(menu.calls==4)
+    assert(menu.calls==5)
     b=binding(true,mock({[P]=3},'all'));b.sync();b.sync()
-    assert(b.settings.tactical_reload and b.settings.per_round_threshold==1 and #b.logs==5)
+    assert(b.settings.tactical_reload and b.settings.per_round_threshold==1 and #b.logs==6)
     menu=mock();menu.conditional_options=nil;b=binding(false,menu);b.sync()
     assert(b.logs[1]:find('OPTIONS_VISIBILITY_UNSUPPORTED',1,true))
+end)
+test('logging changes do not rearm or cancel the active reload',function()
+    local menu=mock();local b=binding(false,menu);b.sync();b.state.identity='current'
+    b.state.interrupted_retry_at=2
+    menu.values[L]=true;b.sync()
+    assert(b.settings.logging and b.state.identity=='current' and b.state.interrupted_retry_at==2)
+    menu.values[L]=false;b.sync()
+    assert(not b.settings.logging and b.state.identity=='current')
+end)
+test('logging off performs no file open, write, flush or console print',function()
+    local f=assert(io.open('src/auto_reload.lua','rb'));local main=f:read('*a');f:close()
+    local logging=assert(main:match('(local logger =.-)%-%- MOD_OPTIONS_INSERT'))
+    local opens,writes,flushes,prints=0,0,0,0
+    local env={DEBUG=false,_G={CowboyBingusModLoader={open_log=function()
+        opens=opens+1;return {write=function() writes=writes+1 end,flush=function() flushes=flushes+1 end}
+    end}},print=function() prints=prints+1 end}
+    setmetatable(env,{__index=_G})
+    local factory=assert(loadstring(logging..'\nreturn emit,debug_emit'));setfenv(factory,env)
+    local emit,debug_emit=factory();emit('off');debug_emit('off')
+    assert(opens==0 and writes==0 and flushes==0 and prints==0)
+    env.DEBUG=true;emit('on');debug_emit('on')
+    assert(opens==1 and writes==2 and flushes==2 and prints==1)
+    env.DEBUG=false;emit('off');debug_emit('off')
+    assert(opens==1 and writes==2 and flushes==2 and prints==1)
+    env.DEBUG=true;emit('on again');assert(opens==1 and writes==3)
 end)
 if arg and arg[1] then
     local root,directory=arg[1],assert(arg[2],'isolated test folder required')
@@ -96,14 +123,15 @@ if arg and arg[1] then
         local f=assert(io.open(path,'wb'));f:write(D..'\t5\n');f:close();os.remove(path..'.bak')
         local menu=fresh_menu();local b=binding(false,menu);b.sync()
         local state=upvalue(menu.register_option,'state')
-        assert(state.option_count==4 and #state.mods==1 and state.options[D]==nil)
+        assert(state.option_count==5 and #state.mods==1 and state.options[D]==nil)
         assert(state.options[P].visible_if==T and state.options[A].visible_if==T)
-        assert(menu.set(T,true) and menu.set(S,false) and menu.set(P,3) and menu.set(A,2))
+        assert(menu.set(T,true) and menu.set(S,false) and menu.set(P,3) and menu.set(A,2) and menu.set(L,true))
         b.sync();assert(b.settings.per_round_threshold==3 and b.settings.ac8_threshold==2)
         local step=upvalue(update,'step');upvalue(step,'save_values')()
         menu=fresh_menu();b=binding(false,menu);b.sync()
         assert(b.settings.tactical_reload and not b.settings.shooting_postpones)
         assert(b.settings.per_round_threshold==3 and b.settings.ac8_threshold==2 and b.settings.reload_delay==nil)
+        assert(b.settings.logging)
         for _,suffix in ipairs({'','.bak','.tmp'}) do os.remove(path..suffix) end
     end)
 end

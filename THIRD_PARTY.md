@@ -15,7 +15,11 @@
   game executable code or asset payloads and serve only exact identity checks.
 - The addon declaration, archive format and manifest are compatible with Bingus
   Shared Loader. The package encoder was separated from the existing shared-loader
-  workspace. The loader itself, its game assets and other mods are not bundled.
+  workspace. The loader itself and its game assets are not bundled.
+- The unified package includes Mod Options Menu v1.3 and its byte-identical
+  Bingus Shared Runtime files, by CowboyBingus, under Zero-Clause BSD. The notice
+  is distributed as `ModOptionsMenu-LICENSE.txt`; the conditional-menu changes
+  are retained in `integrations/ModOptionsMenu-v1.3-conditional.patch`.
 - LuaJIT is a separately supplied test/runtime dependency (MIT), not vendored.
 
 No repository-wide license grant is implied by publication. Third-party MIT

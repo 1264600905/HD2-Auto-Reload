@@ -3,6 +3,7 @@ from pathlib import Path
 import hashlib
 import argparse
 import re
+import importlib.util
 
 from package import build_addon
 
@@ -10,7 +11,6 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / 'src/auto_reload.lua'
 BUILD = ROOT / 'build'
 MARKER = '-- STATIC_COMPONENT_READER_INSERT'
-DEBUG_MARKER = 'local DEBUG = false -- DEBUG_BUILD_FLAG'
 CONFIG_MARKER = '-- RELOAD_CONFIG_INSERT'
 OPTIONS_MARKER = '-- MOD_OPTIONS_INSERT'
 MAPS = {
@@ -75,9 +75,8 @@ def validate_reload_config(config):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--game-dir', type=Path, help='Optional local game directory for SHA256 verification')
-    parser.add_argument('--debug', action='store_true', help='Build a diagnostic package with reload trace logging')
-    parser.add_argument('--enable-tactical-reload', action='store_true',
-                        help='Default to tactical reload; Mod Options Menu can change this in game')
+    parser.add_argument('--menu-source', type=Path, default=ROOT.parent / 'ModOptionsMenu-main',
+                        help='Mod Options Menu v1.3 source to bundle in the single package')
     args = parser.parse_args()
     supported_hashes = {
         ('73374bd4e38386beb9a23bef480082b67d457ebc77485fbec5f488b4e95e201f',
@@ -93,11 +92,7 @@ def main():
     source = SOURCE.read_text(encoding='utf-8')
     reload_config = RELOAD_CONFIG.read_text(encoding='utf-8')
     validate_reload_config(reload_config)
-    if args.enable_tactical_reload:
-        reload_config = re.sub(
-            r'^(local ENABLE_TACTICAL_RELOAD = )(?:true|false)( -- 启用战术换弹)$',
-            r'\g<1>true\g<2>', reload_config, count=1, flags=re.M)
-    if (source.count(MARKER) != 1 or source.count(DEBUG_MARKER) != 1 or
+    if (source.count(MARKER) != 1 or
             source.count(CONFIG_MARKER) != 1 or source.count(OPTIONS_MARKER) != 1):
         raise SystemExit('source build marker missing or duplicated')
     insertion = INSERT
@@ -105,19 +100,27 @@ def main():
         insertion = insertion.replace('__' + name + '_MAP__', bytes.fromhex(path.read_text()).hex())
     generated = source.replace(MARKER, insertion).replace(
         CONFIG_MARKER, reload_config).replace(
-        OPTIONS_MARKER, (ROOT / 'src/mod_options.lua').read_text(encoding='utf-8')).replace(
-        DEBUG_MARKER, 'local DEBUG = ' + str(args.debug).lower() + ' -- DEBUG_BUILD_FLAG')
+        OPTIONS_MARKER, (ROOT / 'src/mod_options.lua').read_text(encoding='utf-8'))
+    menu_root = args.menu_source.resolve()
+    menu_script = menu_root / 'scripts/entry.py'
+    if not menu_script.is_file():
+        raise SystemExit('Mod Options Menu v1.3 source is required; pass --menu-source')
+    spec = importlib.util.spec_from_file_location('bundled_menu_entry', menu_script)
+    menu_builder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(menu_builder)
+    menu_entry = menu_builder.entry_text(menu_root)
+    if b'conditional_options = true' not in menu_entry:
+        raise SystemExit('Bundled menu must support conditional options (v1.3)')
     BUILD.mkdir(parents=True, exist_ok=True)
-    suffix = ('-tactical' if args.enable_tactical_reload else '') + ('-debug' if args.debug else '')
-    entry = BUILD / ('auto_reload_entry' + suffix.replace('-', '_') + '.lua')
+    entry = BUILD / 'auto_reload_entry.lua'
     entry.write_text(generated, encoding='utf-8', newline='\n')
-    prefix = '[战术换弹]' if args.enable_tactical_reload else '[普通换弹]'
-    output = BUILD / (prefix + 'Auto-Reload-v0.6.8' + suffix + '.zip')
+    output = BUILD / 'Auto-Reload-v0.6.8.zip'
     build_addon('mods/liu/auto_reload_rounds', generated.encode('utf-8'),
                 '4df5aee3-3c5d-47fc-b0e9-0a40f7988738', output,
-                'Auto Reload v0.6.8' + (' tactical' if args.enable_tactical_reload else '') +
-                (' Debug' if args.debug else '') +
-                ' (Mod Options Menu; Heat; builds 25327279/25480438)')
+                'Auto Reload v0.6.8 (bundled menu; in-game tactical and logging switches)',
+                extra_resources={'mods/cowboybingus/mod_options_menu': menu_entry},
+                extra_files={'ModOptionsMenu-LICENSE.txt': (menu_root / 'LICENSE').read_bytes(),
+                             'HD2-C4-Quick-Actions-MIT.txt': (ROOT / 'LICENSES/HD2-C4-Quick-Actions-MIT.txt').read_bytes()})
     print('Built', output)
 
 if __name__ == '__main__':
