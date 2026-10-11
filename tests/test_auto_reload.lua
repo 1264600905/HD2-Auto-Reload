@@ -10,16 +10,19 @@ local tests = 0
 local function scenario(tactical_enabled, settings)
     local row = {context_status='context_observed', ammo_path='weapon_rounds',
         current_weapon_resource='safe', selected_entity_id=1, weapon_owned=true,
-        rounds_magazine_count=0, rounds_chambered=false}
+        rounds_magazine_count=0, rounds_chambered=false, weapon_context='on_foot'}
     local state = {elapsed=0, ticks=0, latest_row=row, latest_at=0, keys={}}
     local sent, logs, fresh, focused, own_down = 0, {}, row, true, false
     local raw_keys = {}
-    local send_ok = true
+    local send_ok, interrupted = true, false
+    local interrupt_flags = {}
     local api = {key_state=function(code) return raw_keys[code] or 0 end, game_focused=function() return focused end,
         own_reload_active=function() return own_down end,
-        send_reload=function()
+        send_reload=function(interrupt_fire)
+            interrupt_flags[#interrupt_flags+1] = interrupt_fire == true
             if not send_ok then return false,'keyup_frame_pending' end
-            sent=sent+1; return true,'test'
+            sent=sent+1; local was_interrupted=interrupted; interrupted=false
+            return true,'test',was_interrupted
         end}
     local selected_policies = policies
     -- Keep generic magazine click-timing coverage independent of SG-8P's
@@ -46,6 +49,8 @@ local function scenario(tactical_enabled, settings)
         fresh=function(value) fresh=value end, focus=function(value) focused=value end,
         own_key=function(value) own_down=value end,
         allow_send=function(value) send_ok=value end,
+        interrupted_request=function() interrupted=true end,
+        interrupt_flags=interrupt_flags,
         click=function(t) state.last_lmb_press_at=t; state.lmb_edge_time=t end,
         step=function(t) state.elapsed=t; state.latest_at=t; step() end,
         continuous_step=function(t) state.elapsed=t; state.latest_at=t; step(); continuous() end}
@@ -879,6 +884,88 @@ test('MG206 never requests at 70 rounds or during a loaded-chamber magazine repl
             end
         end
     end
+end)
+
+test('fire interruption excludes stationary and vehicle reloads', function()
+    for _,resource in ipairs({'11c27d3babb38956','9f80d67a12a7e40f','2152d5147b0ac418',
+        'cd00bdc1149c2928','26e40437ea275296','25aa2fd4643cf4ee','cc786f6491fe7e65',
+        'd54b9505c0f72873','e8d5f49ad7780e54'}) do
+        local s=scenario(); s.row.current_weapon_resource=resource
+        s.step(0); assert(s.sent()==0)
+        s.click(.1); s.step(.1)
+        assert(s.sent()==1 and s.interrupt_flags[1]==false,resource)
+    end
+    local s=scenario(); s.row.weapon_context='vehicle'; s.step(0)
+    assert(s.sent()==1 and s.interrupt_flags[1]==false)
+    local c=scenario(); c.step(0); assert(c.interrupt_flags[1]==true)
+end)
+
+test('an interrupted request gets only two delayed retries', function()
+    local s=configured_magazine('84354339522c932d',3,0)
+    s.interrupted_request(); s.step(0); assert(s.sent()==1)
+    s.step(.999); assert(s.sent()==1)
+    s.own_key(true); s.step(1); assert(s.sent()==1)
+    s.own_key(false); s.allow_send(false); s.step(1.1); assert(s.sent()==1)
+    s.allow_send(true); s.step(1.2); assert(s.sent()==2)
+    s.step(3.199); assert(s.sent()==2)
+    s.step(3.201); assert(s.sent()==3)
+    s.step(10); s.step(30); assert(s.sent()==3 and s.state.interrupted_retry_at==nil)
+    local ordinary=scenario(); ordinary.step(0); ordinary.step(3)
+    assert(ordinary.sent()==1 and ordinary.state.interrupted_retry_at==nil)
+end)
+
+test('interruption and retries are cancelled by recovery, identity or focus', function()
+    for _,mode in ipairs({'refill','partial','identity','focus','missing'}) do
+        local s=configured_magazine('84354339522c932d',1,0)
+        s.interrupted_request(); s.step(0)
+        s.state.attack_interrupted=true
+        if mode=='refill' then s.row.magazine_count=30
+        elseif mode=='partial' then s.row.magazine_count=2
+        elseif mode=='identity' then s.row.selected_entity_id=2; s.row.magazine_count=30
+        elseif mode=='focus' then s.focus(false)
+        else s.row.context_status='unresolved' end
+        s.step(.2)
+        assert(s.state.attack_interrupted==nil and s.state.interrupted_retry_at==nil,mode)
+    end
+end)
+
+test('mouse release precedes R in the same update and never injects a mouse press', function()
+    local ffi=require('ffi')
+    local now, focused, held, failed, fail_r = 1000,true,true,false,false
+    local events, state = {},{ticks=0,elapsed=0}
+    local user={GetForegroundWindow=function() return ffi.cast('void *',1) end,
+        GetWindowThreadProcessId=function(_,owner) owner[0]=focused and 123 or 999 end,
+        GetAsyncKeyState=function(code) return code==1 and held and -32768 or 0 end,
+        SendInput=function(_,input,size)
+            assert(size==40); input=ffi.cast('const uint8_t *',input)
+            local kind=tonumber(ffi.cast('const uint32_t *',input)[0])
+            local flags=tonumber(ffi.cast('const uint32_t *',input+(kind==0 and 20 or 12))[0])
+            if kind==0 then assert(flags==4); events[#events+1]='mouse_up'; return failed and 0 or 1 end
+            assert(kind==1 and (flags==8 or flags==10))
+            events[#events+1]=flags==8 and 'R_down' or 'R_up'
+            return flags==8 and fail_r and 0 or 1
+        end}
+    local kernel={GetCurrentProcess=function() return nil end,GetCurrentProcessId=function() return 123 end,
+        GetTickCount64=function() return now end}
+    local shim=setmetatable({load=function(name) return name=='user32' and user or kernel end},{__index=ffi})
+    local code=assert(source:match('(local function read_api%(%).-)%\nlocal function context_reader'))
+    local factory=assert(loadstring(code..'\nreturn read_api()'))
+    setfenv(factory,setmetatable({require=function() return shim end,bit=require('bit'),
+        debug_emit=function() end,state=state},{__index=_G}))
+    local api=factory()
+    focused=false; assert(not api.send_reload(true) and #events==0)
+    focused=true; failed=true; assert(not api.send_reload(true) and state.attack_interrupted==nil)
+    failed=false; fail_r=true
+    assert(not api.send_reload(true) and events[2]=='mouse_up' and events[3]=='R_down')
+    assert(state.attack_interrupted==true and state.ticks==0 and now==1000)
+    fail_r=false; held=false
+    local ok,_,interrupted=api.send_reload(true)
+    assert(ok and interrupted and events[4]=='R_down' and state.attack_interrupted==nil)
+    now=1081; state.ticks=1; assert(api.release_reload() and events[5]=='R_up')
+    state.ticks=2; held=true; assert(api.send_reload(false) and events[6]=='R_down')
+    now=1162; state.ticks=3; assert(api.release_reload())
+    state.ticks=4
+    assert(api.send_reload(true) and events[8]=='mouse_up' and events[9]=='R_down')
 end)
 
 test('scan-code press spans frames and failed keyup is retried', function()

@@ -12,8 +12,9 @@ local TACTICAL_RAPID_CLICK_WINDOW_SECONDS = 0.5
 local TACTICAL_CLICK_DELAYS = {0.1, 0.2, 0.4, 0.6}
 local SPEARGUN_RESOURCE = '3828e2051aa9e897'
 local SPEARGUN_RETRY_DELAYS = {0.25, 0.5, 1.0}
+local INTERRUPTED_RETRY_DELAYS = {1.0, 2.0}
 -- RELOAD_CONFIG_INSERT
-local state = {revision = DEBUG and 'auto-reload-0.6.6-debug' or 'auto-reload-0.6.6',
+local state = {revision = DEBUG and 'auto-reload-0.6.7-debug' or 'auto-reload-0.6.7',
     ticks = 0, elapsed = 0, snapshots = 0,
     latest_row = nil,
     lmb_edge_time = nil, empty_since = nil, attempted = false, identity = nil,
@@ -157,7 +158,15 @@ local function read_api()
         end
         return true
     end
-    function api.send_reload()
+    local function release_attack()
+        local input = ffi.new('uint8_t[40]')
+        -- INPUT_MOUSE / MOUSEEVENTF_LEFTUP. Do not change aim or move the mouse.
+        ffi.cast('uint32_t *', input + 20)[0] = 4
+        local sent = tonumber(send_input(1, input, 40))
+        debug_emit('DEBUG_RELEASE_ATTACK tick=' .. state.ticks .. ' sent=' .. tostring(sent))
+        return sent == 1
+    end
+    function api.send_reload(interrupt_fire)
         if not api.game_focused() then return false, 'game_not_focused' end
         if release_at then return false, 'key_release_pending' end
         if released_tick == state.ticks then return false, 'keyup_frame_pending' end
@@ -169,9 +178,17 @@ local function read_api()
             -- Let the game observe keyup before retrying keydown next frame.
             return false, 'stale_key_released_retry_next_frame'
         end
+        if interrupt_fire and bit.band(api.key_state(0x01), 0x8000) ~= 0 then
+            if not release_attack() then return false, 'attack_release_rejected' end
+            state.attack_interrupted = true
+        end
+        -- Send R in this same update, immediately after the mouse release.
         if not key_event(false) then return false, 'keydown_rejected' end
         release_at = api.now() + 0.08
-        return true, 'keydown_accepted_release_after_80ms_not_reload_confirmation'
+        local interrupted = interrupt_fire and state.attack_interrupted == true
+        state.attack_interrupted = nil
+        return true, interrupted and 'keydown_accepted_after_attack_release_not_reload_confirmation' or
+            'keydown_accepted_release_after_80ms_not_reload_confirmation', interrupted
     end
     return api
 end
@@ -832,12 +849,17 @@ local function reset_speargun_retries()
     state.speargun_retry_at, state.speargun_retry_count = nil, nil
 end
 
+local function reset_fire_interrupt()
+    state.attack_interrupted = nil
+    state.interrupted_retry_at, state.interrupted_retry_count, state.interrupted_ammo = nil, nil, nil
+end
+
 local function reload_request(reason, expected_tactical_count)
     debug_emit(string.format('DEBUG_RELOAD_ENTER tick=%d elapsed=%.3f reason=%s resource=%s',
         state.ticks, state.elapsed, reason,
         tostring(state.latest_row and state.latest_row.current_weapon_resource)))
     if not reload_delay_finished() then return end
-    if state.attempted and reason ~= 'empty_attack' and reason ~= 'empty_retry' and reason ~= 'tactical_idle' and
+    if state.attempted and reason ~= 'empty_attack' and reason ~= 'empty_retry' and reason ~= 'interrupted_retry' and reason ~= 'tactical_idle' and
         reason ~= 'tactical_last_round' and reason ~= 'tactical_zero' and reason ~= 'tactical_immediate' then
         debug_emit('DEBUG_RELOAD_SKIP reason=already_attempted')
         return
@@ -872,7 +894,9 @@ local function reload_request(reason, expected_tactical_count)
     end
     debug_emit(string.format('DEBUG_RELOAD_SEND_BEGIN tick=%d elapsed=%.3f',
         state.ticks, state.elapsed))
-    local ok, detail = api.send_reload()
+    local interrupt_fire = fresh.weapon_context == 'on_foot' and
+        not attack_only_resources[fresh.current_weapon_resource]
+    local ok, detail, interrupted = api.send_reload(interrupt_fire)
     debug_emit(string.format('DEBUG_RELOAD_SEND_END tick=%d elapsed=%.3f ok=%s detail=%s',
         state.ticks, state.elapsed, tostring(ok), tostring(detail)))
     emit(string.format(
@@ -885,6 +909,15 @@ local function reload_request(reason, expected_tactical_count)
         state.last_request = state.elapsed
         state.reload_pending_attack = nil
         state.attempted = true; state.request_at = state.elapsed
+        local rule = tactical_rule(fresh)
+        if interrupt_fire and fresh.current_weapon_resource ~= SPEARGUN_RESOURCE and
+            not (rule and rule.continuous) and (interrupted or reason == 'interrupted_retry') then
+            state.interrupted_retry_count = reason == 'interrupted_retry' and
+                (state.interrupted_retry_count or 0) + 1 or 0
+            local delay = INTERRUPTED_RETRY_DELAYS[state.interrupted_retry_count + 1]
+            state.interrupted_retry_at = delay and state.elapsed + delay or nil
+            state.interrupted_ammo = observed_round_count(fresh)
+        end
         if fresh.current_weapon_resource == SPEARGUN_RESOURCE and truly_empty(fresh) then
             -- SendInput acceptance does not confirm that the game began loading.
             -- Retry this single-shot weapon only a finite number of times.
@@ -914,6 +947,7 @@ local function auto_reload_step()
         reset_tactical_clicks()
         reset_reload_delay()
         reset_speargun_retries()
+        reset_fire_interrupt()
         return
     end
     local identity = tostring(row.current_weapon_resource) .. ':' .. tostring(row.selected_entity_id) ..
@@ -928,6 +962,7 @@ local function auto_reload_step()
         reset_tactical_clicks()
         reset_reload_delay()
         reset_speargun_retries()
+        reset_fire_interrupt()
         emit('WEAPON_CONTEXT resource=' .. tostring(row.current_weapon_resource) ..
             ' entity=' .. tostring(row.selected_entity_id) .. ' policy=' .. row.ammo_path)
     end
@@ -944,6 +979,10 @@ local function auto_reload_step()
     end
     local eligible = rounds_empty(row)
     track_reload_delay(row, eligible)
+    local ammo = observed_round_count(row)
+    if not eligible or (state.interrupted_ammo and ammo and ammo > state.interrupted_ammo) then
+        reset_fire_interrupt()
+    end
     if not eligible then state.immediate_count = nil end
     if count ~= 1 then state.critical_one_requested = false end
     if not rule or rule.limit ~= 0 or count ~= 0 then
@@ -962,6 +1001,11 @@ local function auto_reload_step()
             state.request_at = nil
         end
         if not reload_delay_finished() then return end
+        if state.interrupted_retry_at and state.elapsed >= state.interrupted_retry_at and
+            not (api.own_reload_active and api.own_reload_active()) then
+            reload_request('interrupted_retry')
+            return
+        end
         if row.current_weapon_resource == SPEARGUN_RESOURCE and truly_empty(row) and
             state.speargun_retry_at and state.elapsed >= state.speargun_retry_at and
             not (api.own_reload_active and api.own_reload_active()) then
@@ -1093,7 +1137,8 @@ local function continuous_reload_step()
     if fresh_shot_postpones(row, fresh) then return end
     debug_emit(string.format('DEBUG_CONTINUOUS_SEND_BEGIN tick=%d elapsed=%.3f',
         state.ticks, state.elapsed))
-    local ok, detail = api.send_reload()
+    local ok, detail = api.send_reload(fresh.weapon_context == 'on_foot' and
+        not attack_only_resources[fresh.current_weapon_resource])
     debug_emit(string.format('DEBUG_CONTINUOUS_SEND_END tick=%d elapsed=%.3f ok=%s detail=%s',
         state.ticks, state.elapsed, tostring(ok), tostring(detail)))
     emit(string.format(

@@ -36,6 +36,8 @@ local function reset_reload_settings_state()
     state.reload_pending_attack, state.reload_shot_generation = nil, nil
     state.continuous_identity, state.continuous_probe_at = nil, nil
     state.speargun_retry_at, state.speargun_retry_count = nil, nil
+    state.attack_interrupted = nil
+    state.interrupted_retry_at, state.interrupted_retry_count, state.interrupted_ammo = nil, nil, nil
 end
 
 local function sync_mod_options()

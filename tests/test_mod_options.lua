@@ -120,7 +120,7 @@ test('built addon binds options at startup or later and forwards the update chai
         _G.ModOptionsMenu=early and menu or nil; _G.LiuAutoReloadRounds=nil
         _G.update=function(dt,extra) calls=calls+1; assert(dt==.1 and extra=='forwarded'); return 'previous' end
         local state=dofile('build/auto_reload_entry.lua')
-        assert(state.revision=='auto-reload-0.6.6' and menu.calls==(early and 3 or 0))
+        assert(state.revision=='auto-reload-0.6.7' and menu.calls==(early and 3 or 0))
         _G.ModOptionsMenu=menu
         assert(update(.1,'forwarded')=='previous' and update(.1,'forwarded')=='previous')
         assert(calls==2 and menu.calls==3 and state.ticks==2)
