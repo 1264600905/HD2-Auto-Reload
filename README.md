@@ -5,27 +5,20 @@
 Helldivers 2 自动换弹 Mod，依赖 **Bingus Shared Loader v15+ / API 1**。
 本仓库独立维护自动换弹源码、打包工具和测试，不包含 Loader 或其他 Mod 项目。
 
-## 本地持续开火试验版 v0.6.7
+## 本地版 v0.6.8
 
-非站桩手持武器达到换弹条件时，若左键仍按住，会先模拟松开左键，并在同一次更新中请求 R，不增加固定延迟，也不松开瞄准。经过打断的单次请求最多补发两次，间隔为 1、2 秒；弹药增加或上下文改变即取消。站桩武器与载具保持原有规则，毒矛和逐发续装保留原有重试。
+战术版安装包为 `build/[战术换弹]Auto-Reload-v0.6.8-tactical.zip`，配套菜单为 `ModOptionsMenu-main/releases/Mod-Options-Menu-v1.3.zip`。替换各自旧包，部署后重启游戏，只保留各一份。默认推荐非诊断包。
 
-本次先验证停止开火后换弹，不自动恢复左键按下；换弹后需重新按下开火。实机效果尚待验证。诊断安装包为 `build/[战术换弹]Auto-Reload-v0.6.7-tactical-debug.zip`，运行版本应为 `auto-reload-0.6.7-debug`。替换旧包、部署后重启游戏，保持仅一份自动换弹。
+- 22 个整弹匣武器统一在弹匣剩 1 发时战术换弹；逐发武器原阈值仍是默认值。
+- 换弹延迟固定为 0，删除延迟滑块与连续射击/点击等待。
+- **战术换弹/Tactical Reload** 是战术总开关，关闭后仍保留打空自动换弹。
+- 开启战术换弹后显示 **换弹不阻止开火/Reload Does Not Block Firing**、**逐发换弹武器换弹阈值/Per-round Reload Threshold** 和 **AC-8机炮换弹阈值/AC-8 Reload Threshold**。
+- 逐发模式：默认/Default、最后一发/Last Round、第一发/First Shot。AC-8 模式：1发战术换弹/Tactical at 1 Round、5发战术换弹/Tactical at 5 Rounds、不战术换弹/No Tactical Reload。
+- “换弹不阻止开火”只沿用旧选项的名字与保存值，不控制主动松左键。非站桩手持武器仍默认先松左键并在同一次更新内发送 R，无松键开关；换弹后需重新按下开火。
 
-## v0.6.6 菜单设置
+原站桩武器规则保留。AC-8 选不战术或关闭战术总开关后，须真正打空再点击开火才换弹。子选项隐藏时保存值保留；游戏行为在 APPLY 后生效。旧延迟保存值被忽略。
 
-当前工作区支持 **Mod Options Menu**，在游戏 `Esc → MODS → 自动换弹` 中设置：
-
-- **启用战术换弹**：控制是否按现有武器阈值提前换弹。普通包默认关闭，战术包默认开启；已有保存值优先。
-- **换弹延迟（秒）**：0–5 秒，步进 0.05 秒，默认 0。适用于普通、战术和散热器换弹，包括此前立即换弹的高速武器和最后一发。
-- **射击推迟下一次换弹**：默认开启；在换弹窗口内每次射击重新计算上述延迟，包括按住射击产生的弹药消耗。关闭后射击不重置计时。
-
-点击 **APPLY / 应用（Tab）** 后生效，Mod Options Menu 负责保存并在重启后恢复。替换自动换弹包、同时安装 Mod Options Menu v1.2 和 Bingus Shared Loader v18+，部署后重启游戏。只需保留一个自动换弹包，两种包都能在菜单中切换战术换弹。未安装菜单时沿用原有构建默认值及计时规则。
-
-v0.6.6 保留 v0.6.5 的 S-11 矛枪（毒矛）有限空仓重试；安装菜单后重试间隔至少为设置的延迟。站桩换弹武器仍需空仓后重新点击射击，并从该次点击开始等待；逐发续装开始后仍保持至少 0.1 秒的请求间隔。
-
-离线控制器、菜单 API、设置保存恢复、读取链和打包验证通过。用户已确认驱逐者在调整键位后恢复正常；尚未完成全部菜单选项与武器的实机验证。构建和测试方法见下文，设置行为及实机检查步骤见 [菜单设置说明](docs/MOD_OPTIONS_0.6.6.md)。运行日志版本为 `auto-reload-0.6.6`，诊断包为 `auto-reload-0.6.6-debug`。
-
-当前构建脚本的普通、战术及诊断产物均为 v0.6.7。下文的 v0.6.4 分支表、Release 链接和历史安装说明对应已发布基线；v0.6.7 暂为本地测试版本，未发布。v0.6.5 的毒矛诊断记录见 [原修复说明](docs/SPEARGUN_RETRY_0.6.5.md)。
+本次只做离线检查和打包，新阈值与菜单仍待用户部署后验证。详细规则、默认值与容量读法见 [v0.6.8 菜单说明](docs/MOD_OPTIONS_0.6.8.md)。旧版记录保留在 [v0.6.6 菜单说明](docs/MOD_OPTIONS_0.6.6.md) 和 [更新记录](CHANGELOG.md)。
 
 ## 分支与版本
 
@@ -82,29 +75,19 @@ python scripts/build.py --enable-tactical-reload
 python scripts/build.py --game-dir '你的 Steam 游戏目录/Helldivers 2'
 ```
 
-当前本地默认产物为 `build/[普通换弹]Auto-Reload-v0.6.7.zip`；加 `--enable-tactical-reload` 会生成 `build/[战术换弹]Auto-Reload-v0.6.7-tactical.zip`。普通和普通诊断包均加 `[普通换弹]` 前缀，战术和战术诊断包均加 `[战术换弹]` 前缀。二者沿用同一 GUID，只能部署其中一份。`build/` 不纳入源码提交。
-安装 Mod Options Menu 后，两种包都支持全部三个设置；已有保存值优先于包的默认值。没有菜单且需要提前换弹时请选择 **`build/[战术换弹]Auto-Reload-v0.6.7-tactical.zip`**。
+当前本地默认产物为 `build/[普通换弹]Auto-Reload-v0.6.8.zip`；加 `--enable-tactical-reload` 会生成 `build/[战术换弹]Auto-Reload-v0.6.8-tactical.zip`。普通和普通诊断包均加 `[普通换弹]` 前缀，战术和战术诊断包均加 `[战术换弹]` 前缀。二者沿用同一 GUID，只能部署其中一份。`build/` 不纳入源码提交。
+安装 Mod Options Menu 后，两种包都支持全部三个设置；已有保存值优先于包的默认值。没有菜单且需要提前换弹时请选择 **`build/[战术换弹]Auto-Reload-v0.6.8-tactical.zip`**。
 
 构建默认值也可在 [换弹配置](src/reload_config.lua) 中将 `ENABLE_TACTICAL_RELOAD` 设为 `true`。武器阈值仍为静态配置，修改后须重新构建、部署并重启游戏。菜单设置在应用后生效，无需重新构建。
 
-以下点击等待和立即换弹规则说明**未安装 Mod Options Menu 时的行为**；菜单成功注册延迟选项后，所有武器改用设置的延迟，不再递增到 0.2、0.4、0.6 秒，也不再由高速规则或最后一发绕过延迟。
-
-- `limit` 是弹匣阈值，不包含膛内弹；SG-97（总弹 ≤4）和 GL-15（总弹 ≤2）保留 `basis='total'`。
-- 计划 2：AR 开头的手持武器（不含 JAR）、BR-14、SMG 系列、M7S、StA-11、P-2、P-19、M6C/SOCOM 为弹匣 ≤3；M-105 和手持 MK3 为 ≤10。原文 M-105 同时列出 3 和 10，以后一条专门要求为准。
-- 上述武器配置 `immediate=true`：达到阈值立即复核并请求 R，不等 0.1 秒，也不等连续点击延迟。复核期间弹药继续下降仍允许请求；同一余量不每帧重发，继续消耗弹药或重新点击射击可以重试。
-- 其他零阈值规则保留，弹匣 0 发即请求，不必等膛内最后一发打完。没有战术规则的武器仍要求真正空仓。
-- SG-8P 改为 0 发，取消旧 8 发阈值。已核对 Pilot 操作位的堡垒和风暴漩涡主炮均为 0 发，突破机甲战术版为弹匣 ≤5 发逐发补弹；普通版仅空仓触发。其他座位角色与载具武器跳过。
-- 其他战术武器余量大于 1 时，只有进入配置阈值的换弹窗口才开始等待 0.1 秒；窗口内相邻点击间隔 ≤0.5 秒时，提高到 0.2、0.4、0.6 秒，从最新点击重新计时。窗口外的点击不计入，离开窗口后清空计时和档位。余量 1 或 0 时不受这段等待限制。逐发续装请求间隔仍为 0.1 秒。
-- 不设置手动换弹抑制：手动 R 不会锁住后续自动请求。自动输入遇到 R 已按下时先松开，下一次更新再按下；每次模拟按键释放后也至少隔一次更新才允许再次按下。发送失败或等待松键不会消耗重试机会。
-
-当前日志版本为 `auto-reload-0.6.7`，战术版 `START` 行记录构建默认值 `tactical_reload=true reload_delay=0`；菜单已保存或新应用的值见 `OPTIONS_APPLIED` 行。“立即”指设置延迟为 0 后，读取、复核符合条件就发送输入；游戏动画和原生动作限制仍可能拒绝换弹。
+当前规则与选项见 [v0.6.8 菜单说明](docs/MOD_OPTIONS_0.6.8.md)。所有首次请求均零延迟；即时复核、武器身份和自有 R 释放约束仍保留。系统接受输入不代表游戏完成换弹。
 
 组件 map 以十六进制文本保存在 `data/`，构建时嵌入 Lua；运行时验证完整指纹、资源记录和实体身份。
 游戏内还会验证 DLL PE 标识，以及玩家、实体、物品栏、Rounds、Magazine 和 Heat 的已核对指令片段。v5 使用新版 Magazine/Rounds/Heat 全表指纹和定点槽位。
 
 排查空仓附近闪退时可构建 `python scripts/build.py --debug`，产物为
-`build/[普通换弹]Auto-Reload-v0.6.7-debug.zip`；默认启用战术规则时加 `--enable-tactical-reload`，使用 `build/[战术换弹]Auto-Reload-v0.6.6-tactical-debug.zip`。调试包沿用同一 GUID，应替换普通版并重启游戏。
-日志的 `START` 行会显示 `revision=auto-reload-0.6.7-debug debug=true`；
+`build/[普通换弹]Auto-Reload-v0.6.8-debug.zip`；默认启用战术规则时加 `--enable-tactical-reload`，使用 `build/[战术换弹]Auto-Reload-v0.6.6-tactical-debug.zip`。调试包沿用同一 GUID，应替换普通版并重启游戏。
+日志的 `START` 行会显示 `revision=auto-reload-0.6.8-debug debug=true`；
 `DEBUG_SNAPSHOT_*`、`DEBUG_AUTO_STEP_*`、`DEBUG_RELOAD_*` 和 `DEBUG_SENDINPUT_*`
 会在接近空仓及请求换弹时记录调用边界。
 日志仍位于 `%LOCALAPPDATA%/CowboyBingus/Helldivers2/Logs/AutoReloadRounds.log`。

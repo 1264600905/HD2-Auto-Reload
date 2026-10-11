@@ -27,12 +27,11 @@ class ReloadConfigTests(unittest.TestCase):
             self.assertNotIn(excluded, ids)
         self.assertIn('05d8d8c073b9d502', ids)  # SG-8P
 
-    def test_plan_two_thresholds_and_immediate_policy(self):
+    def test_fast_families_use_one_round_and_immediate_policy(self):
         rules = re.findall(r"name='([^']+)', path='[^']+', limit=(\d+)([^}]*)", self.config)
         fast = 0
         for name, limit, options in rules:
-            expected = (10 if name.startswith('M-105') else
-                        3 if name.startswith(('AR', 'SMG')) or name in
+            expected = (1 if name.startswith(('AR', 'SMG', 'M-105')) or name in
                         ('BR-14', 'M7S', 'StA-11', 'P-2', 'P-19', 'M6C/SOCOM') else None)
             if expected is not None:
                 fast += 1

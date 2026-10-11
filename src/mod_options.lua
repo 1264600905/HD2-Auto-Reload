@@ -1,24 +1,32 @@
--- Optional Mod Options Menu API 1 integration; either addon may load first.
--- Keep the original build-time timing when the menu is not installed.
+-- Optional Mod Options Menu API 1 integration. Timing is always immediate.
 local reload_settings = {
     tactical_reload = ENABLE_TACTICAL_RELOAD,
-    reload_delay = 0,
-    shooting_postpones = true,
-    configurable_timing = false,
+    shooting_postpones = true, -- Existing saved preference; renamed only.
+    per_round_threshold = 1,
+    ac8_threshold = 1,
 }
+local TACTICAL_OPTION = 'liu.auto_reload.tactical_reload'
 local reload_options = {
-    {key='tactical_reload', id='liu.auto_reload.tactical_reload', spec={
-        type='toggle', label='启用战术换弹', default=ENABLE_TACTICAL_RELOAD,
-        description='开启后按各武器的弹药阈值提前换弹；关闭后仅空仓换弹。站桩换弹武器仍需空仓后重新点击射击。'}},
-    {key='reload_delay', id='liu.auto_reload.reload_delay', spec={
-        type='slider', label='换弹延迟（秒）', min=0, max=5, step=0.05, default=0,
-        description='达到换弹条件后等待的时间，0 表示立即请求换弹。适用于普通、战术和散热器换弹。站桩武器从空仓后的射击点击开始计时。'}},
+    {key='tactical_reload', id=TACTICAL_OPTION, spec={
+        type='toggle', label='战术换弹/Tactical Reload', default=ENABLE_TACTICAL_RELOAD,
+        description='开启后使用战术阈值；关闭后仍保留打空自动换弹。/ Enables tactical thresholds; empty reload remains active when off.'}},
     {key='shooting_postpones', id='liu.auto_reload.shooting_postpones', spec={
-        type='toggle', label='射击推迟下一次换弹', default=true,
-        description='开启后，在换弹窗口内每次射击都会重新计算设置的延迟，包括按住射击的连续消耗。关闭后射击不重置等待时间。延迟为 0 时无额外等待。'}},
+        type='toggle', label='换弹不阻止开火/Reload Does Not Block Firing', default=true,
+        visible_if=TACTICAL_OPTION,
+        description='此项不控制主动松开左键；换弹延迟固定为0。/ This preference does not control automatic fire release; reload delay is zero.'}},
+    {key='per_round_threshold', id='liu.auto_reload.per_round_threshold', spec={
+        type='choice', label='逐发换弹武器换弹阈值/Per-round Reload Threshold', default=1,
+        visible_if=TACTICAL_OPTION,
+        choices={'默认/Default', '最后一发/Last Round', '第一发/First Shot'},
+        description='默认保留原阈值；最后一发在总余弹1发时开始；第一发在打掉第一发后补弹。/ Default keeps each threshold; Last Round starts at one total round; First Shot reloads after the first shot.'}},
+    {key='ac8_threshold', id='liu.auto_reload.ac8_threshold', spec={
+        type='choice', label='AC-8机炮换弹阈值/AC-8 Reload Threshold', default=1,
+        visible_if=TACTICAL_OPTION,
+        choices={'1发战术换弹/Tactical at 1 Round', '5发战术换弹/Tactical at 5 Rounds', '不战术换弹/No Tactical Reload'},
+        description='按弹匣余量触发；不战术换弹或关闭战术总开关后，须打空再按开火才换弹。/ Uses magazine rounds. No Tactical Reload, or the tactical switch off, requires a new fire press after empty.'}},
 }
 for _, option in ipairs(reload_options) do
-    option.spec.mod, option.spec.mod_id = '自动换弹', 'liu.auto_reload'
+    option.spec.mod, option.spec.mod_id = '自动换弹/Auto Reload', 'liu.auto_reload'
 end
 
 local options_menu, registered_options
@@ -28,12 +36,7 @@ local function reset_reload_settings_state()
     state.request_at, state.last_request, state.immediate_count = nil, nil, nil
     state.lmb_edge_time, state.last_lmb_press_at = nil, nil
     state.critical_one_requested, state.critical_zero_requested = false, false
-    state.tactical_window_since, state.tactical_last_click_at = nil, nil
-    state.tactical_seen_click_at, state.tactical_click_tier = nil, nil
-    state.tactical_click_generation, state.tactical_sent_generation = nil, nil
-    state.reload_window_since, state.reload_wait_since = nil, nil
-    state.reload_seen_click_at, state.reload_previous_count = nil, nil
-    state.reload_pending_attack, state.reload_shot_generation = nil, nil
+    state.tactical_sent_generation = nil
     state.continuous_identity, state.continuous_probe_at = nil, nil
     state.speargun_retry_at, state.speargun_retry_count = nil, nil
     state.attack_interrupted = nil
@@ -55,8 +58,8 @@ local function sync_mod_options()
                 emit('OPTIONS_REGISTER_FAILED id=' .. option.id .. ' reason=' .. tostring(called and reason or ok))
             end
         end
-        if registered_options.reload_delay and not reload_settings.configurable_timing then
-            reload_settings.configurable_timing, changed = true, true
+        if not menu.conditional_options then
+            emit('OPTIONS_VISIBILITY_UNSUPPORTED requires=Mod-Options-Menu-v1.3')
         end
     end
     -- get() exposes applied values only, also including changes from set().
@@ -64,18 +67,20 @@ local function sync_mod_options()
         if registered_options[option.key] then
             local ok, value = pcall(menu.get, option.id)
             local valid = option.spec.type == 'toggle' and type(value) == 'boolean' or
-                option.spec.type == 'slider' and type(value) == 'number' and
-                value == value and value >= option.spec.min and value <= option.spec.max
+                option.spec.type == 'choice' and type(value) == 'number' and value % 1 == 0 and
+                value >= 1 and value <= #option.spec.choices
             if ok and valid and reload_settings[option.key] ~= value then
                 reload_settings[option.key], changed = value, true
             end
         end
     end
-    if changed then
-        reset_reload_settings_state()
+    if changed then reset_reload_settings_state() end
+    if changed or not state.options_logged then
+        state.options_logged = true
         emit('OPTIONS_APPLIED tactical_reload=' .. tostring(reload_settings.tactical_reload) ..
-            ' reload_delay=' .. tostring(reload_settings.reload_delay) ..
+            ' reload_delay=0' ..
             ' shooting_postpones=' .. tostring(reload_settings.shooting_postpones) ..
-            ' configurable_timing=' .. tostring(reload_settings.configurable_timing))
+            ' per_round_threshold=' .. tostring(reload_settings.per_round_threshold) ..
+            ' ac8_threshold=' .. tostring(reload_settings.ac8_threshold))
     end
 end

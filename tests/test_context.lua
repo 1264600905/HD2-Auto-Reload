@@ -116,6 +116,9 @@ local function mounted(resource_id, seat_type, seat_number, count, path)
     s.put(s.owner+(rounds and 0xf12820 or 0xf124a0),ptr(0xb000000))
     s.put(0xb000000,component_map)
     s.put(0xb000000+#component_map+idx*(rounds and 0x88 or 160),string.rep('\0',rounds and 0x88 or 160))
+    if rounds then
+        s.put(0xb000000+#component_map+idx*0x88+0x48,ffi.string(ffi.new('float[2]',8,12),8))
+    end
     s.put(s.game+(rounds and 0x3326cf0 or 0x3326648),ptr(0xc00000))
     s.map(0xc00000+(rounds and 0x28 or 0x20),42,0)
     s.put(0xc00000+(rounds and 0x40 or 0x38),ptr(0xc10000));s.put(0xc10000,ptr(s.weapon_address))
@@ -139,6 +142,11 @@ for _,target in ipairs({
     s=mounted(unpack(target));local vehicle=assert(s.run())
     assert(vehicle.context_status=='context_observed' and vehicle.weapon_context=='vehicle')
     assert(vehicle.current_weapon_resource==target[1] and vehicle.selected_entity_id==42)
+    if target[5]=='weapon_rounds' then
+        assert(vehicle.rounds_magazine_capacity==8)
+        s.put(0xc30000+4,word(1))
+        assert(s.run().rounds_magazine_capacity==12)
+    end
     assert((vehicle.magazine_count or vehicle.rounds_magazine_count)==target[4])
     assert(vehicle._selection_bytes and vehicle.memory_bytes<32768)
 end

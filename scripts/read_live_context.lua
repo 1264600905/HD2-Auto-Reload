@@ -53,7 +53,7 @@ if arg[6] == 'dry-run' then
     end
     local policies = assert(source:match('(local CONTINUOUS_RELOAD_INTERVAL_SECONDS =.-)\nlocal state ='))
     local controller = assert(source:match('(local function truly_empty.-)\nemit%(%\'START'))
-    local simulation = assert(loadstring(policies .. '\n' .. controller .. '\nreturn auto_reload_step, continuous_reload_step'))
+    local simulation = assert(loadstring(policies .. '\nlocal reload_settings = {tactical_reload=ENABLE_TACTICAL_RELOAD, per_round_threshold=1, ac8_threshold=1}\n' .. controller .. '\nreturn auto_reload_step, continuous_reload_step'))
     setfenv(simulation, setmetatable({state=state, api=api, game=game, bit=require('bit'),
         context_reader=reader, unsafe_resources={}, scalar=tostring,
         debug_emit=function() end, emit=function(line) print('DRY_RUN '..line) end}, {__index=_G}))

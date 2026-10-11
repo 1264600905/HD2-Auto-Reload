@@ -4,42 +4,41 @@ local ENABLE_TACTICAL_RELOAD = false -- 启用战术换弹
 
 -- Keys are exact resource IDs for held or verified selected vehicle weapons.
 -- limit counts the selected magazine only unless basis='total' is specified.
--- immediate skips the legacy firing-click wait when Mod Options Menu is absent.
--- The menu's configured delay applies to every rule, including immediate ones.
+-- All rules request immediately; immediate also permits retries after ammo changes.
 -- continuous is for weapons that load individual rounds. Do not use it for AC-8.
 local tactical_rules = {
     -- AR family (JAR-5, sentries, drones and vehicle weapons excluded).
-    ['84354339522c932d'] = {name='AR-2', path='weapon_magazine', limit=3, immediate=true},
-    ['968211c0033dce64'] = {name='AR-23', path='weapon_magazine', limit=3, immediate=true},
-    ['a7ee1ebf58fcdf1f'] = {name='AR-23A', path='weapon_magazine', limit=3, immediate=true},
-    ['cf5f176e0e322be1'] = {name='AR-23C', path='weapon_magazine', limit=3, immediate=true},
-    ['43cb1033961a2276'] = {name='AR-23P', path='weapon_magazine', limit=3, immediate=true},
-    ['bc29613666df696b'] = {name='AR-32', path='weapon_magazine', limit=3, immediate=true},
-    ['708ea298c82093d0'] = {name='AR-59', path='weapon_magazine', limit=3, immediate=true},
-    ['ce063aa33d95a812'] = {name='AR-61', path='weapon_magazine', limit=3, immediate=true},
-    ['a955c4ea6f6d4203'] = {name='AR/GL-21', path='weapon_magazine', limit=3, immediate=true},
-    ['5fecab819f96a3e8'] = {name='BR-14', path='weapon_magazine', limit=3, immediate=true},
+    ['84354339522c932d'] = {name='AR-2', path='weapon_magazine', limit=1, immediate=true},
+    ['968211c0033dce64'] = {name='AR-23', path='weapon_magazine', limit=1, immediate=true},
+    ['a7ee1ebf58fcdf1f'] = {name='AR-23A', path='weapon_magazine', limit=1, immediate=true},
+    ['cf5f176e0e322be1'] = {name='AR-23C', path='weapon_magazine', limit=1, immediate=true},
+    ['43cb1033961a2276'] = {name='AR-23P', path='weapon_magazine', limit=1, immediate=true},
+    ['bc29613666df696b'] = {name='AR-32', path='weapon_magazine', limit=1, immediate=true},
+    ['708ea298c82093d0'] = {name='AR-59', path='weapon_magazine', limit=1, immediate=true},
+    ['ce063aa33d95a812'] = {name='AR-61', path='weapon_magazine', limit=1, immediate=true},
+    ['a955c4ea6f6d4203'] = {name='AR/GL-21', path='weapon_magazine', limit=1, immediate=true},
+    ['5fecab819f96a3e8'] = {name='BR-14', path='weapon_magazine', limit=1, immediate=true},
     ['0f83639ab8c86165'] = {name='R-2', path='weapon_magazine', limit=0},
     ['e5796355a8fd67e0'] = {name='R-4', path='weapon_magazine', limit=0},
     ['f0338468dcdb6a6c'] = {name='R-72', path='weapon_magazine', limit=0},
     ['03e67a19b07c6523'] = {name='R-63', path='weapon_magazine', limit=0},
     ['4c786785c79d44e7'] = {name='R-63CS', path='weapon_magazine', limit=0},
-    ['4ba41b6f9f405cc2'] = {name='StA-11', path='weapon_magazine', limit=3, immediate=true},
-    ['be70ee0d8d44028e'] = {name='M7S', path='weapon_magazine', limit=3, immediate=true},
-    ['186ea95de7306b1a'] = {name='SMG-203', path='weapon_magazine', limit=3, immediate=true},
-    ['94bd931b5fb4ee95'] = {name='SMG-32', path='weapon_magazine', limit=3, immediate=true},
-    ['4e4a613eb9bf5c24'] = {name='SMG-37', path='weapon_magazine', limit=3, immediate=true},
-    ['0807aea5217e4767'] = {name='SMG-72', path='weapon_magazine', limit=3, immediate=true},
-    ['8a307bd1811a5fe9'] = {name='SMG/FLAM-34', path='weapon_magazine', limit=3, immediate=true},
+    ['4ba41b6f9f405cc2'] = {name='StA-11', path='weapon_magazine', limit=1, immediate=true},
+    ['be70ee0d8d44028e'] = {name='M7S', path='weapon_magazine', limit=1, immediate=true},
+    ['186ea95de7306b1a'] = {name='SMG-203', path='weapon_magazine', limit=1, immediate=true},
+    ['94bd931b5fb4ee95'] = {name='SMG-32', path='weapon_magazine', limit=1, immediate=true},
+    ['4e4a613eb9bf5c24'] = {name='SMG-37', path='weapon_magazine', limit=1, immediate=true},
+    ['0807aea5217e4767'] = {name='SMG-72', path='weapon_magazine', limit=1, immediate=true},
+    ['8a307bd1811a5fe9'] = {name='SMG/FLAM-34', path='weapon_magazine', limit=1, immediate=true},
     ['46183b50961d1328'] = {name='SG-225', path='weapon_magazine', limit=0},
     ['c12a34f375bd5a87'] = {name='SG-225IE', path='weapon_magazine', limit=0},
     ['5ebaea70c0d060b9'] = {name='SG-225SP', path='weapon_magazine', limit=0},
     ['f49227a0630a3f7f'] = {name='CB-9', path='weapon_magazine', limit=0},
     ['cf8934ff6567a42d'] = {name='P-92', path='weapon_magazine', limit=0},
-    ['05e4e5c2db6e44a2'] = {name='P-2', path='weapon_magazine', limit=3, immediate=true},
-    ['3575aabc5f1f9326'] = {name='P-19', path='weapon_magazine', limit=3, immediate=true},
+    ['05e4e5c2db6e44a2'] = {name='P-2', path='weapon_magazine', limit=1, immediate=true},
+    ['3575aabc5f1f9326'] = {name='P-19', path='weapon_magazine', limit=1, immediate=true},
     ['1a437158e1b8d2a1'] = {name='P-113', path='weapon_magazine', limit=0},
-    ['4d58c77087b774c5'] = {name='M6C/SOCOM', path='weapon_magazine', limit=3, immediate=true},
+    ['4d58c77087b774c5'] = {name='M6C/SOCOM', path='weapon_magazine', limit=1, immediate=true},
     ['dbb6c961c59fadc1'] = {name='P-40-K', path='weapon_magazine', limit=0},
 
     -- WeaponRounds: use the selected magazine count unless the old total rule is explicit.
@@ -58,8 +57,8 @@ local tactical_rules = {
 
     -- Support weapons. MK variants below are handheld, not sentries or vehicles.
     ['89c5493e08ca4207'] = {name='APW-1', path='weapon_magazine', limit=0},
-    ['a6a735accb4a327f'] = {name='M-105', path='weapon_magazine', limit=10, immediate=true},
-    ['b43235dbd493750c'] = {name='M-105 MK3', path='weapon_magazine', limit=10, immediate=true},
+    ['a6a735accb4a327f'] = {name='M-105', path='weapon_magazine', limit=1, immediate=true},
+    ['b43235dbd493750c'] = {name='M-105 MK3', path='weapon_magazine', limit=1, immediate=true},
     ['a8cffb316f0b5c5f'] = {name='AC-8', path='weapon_rounds', limit=0},
     ['02eecd0b1fa49630'] = {name='GL-21', path='weapon_magazine', limit=0},
     ['1d5943301a29c940'] = {name='GL-21 MK2', path='weapon_magazine', limit=0},

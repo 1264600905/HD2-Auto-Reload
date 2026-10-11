@@ -1,0 +1,189 @@
+--- a/src/api.lua
++++ b/src/api.lua
+@@ -119,7 +119,7 @@
+ -- Version 2 (v1.1): texts may be functions; limits count characters.
+ -- Version 3: register_option refuses a mod past max_mods (112: past 8 mods
+ -- the category buttons show them in pages); spec.mod_id.
+-local api = {api = 1, version = 3, max_mods = MAX_MODS, max_options = MAX_ROWS}
++local api = {api = 1, version = 4, conditional_options = true, max_mods = MAX_MODS, max_options = MAX_ROWS}
+ -- id: stable unique string that keys the saved value. spec: {type = 'toggle'
+ -- | 'choice' | 'slider', label = 'Row text', mod = 'Mod name', mod_id =
+ -- 'author.mod', default = ..., choices = {...} (choice), min/max/step
+@@ -143,6 +143,7 @@
+     if #mod.order >= MAX_ROWS then return false, 'mod already has ' .. MAX_ROWS .. ' options' end
+     local title = mod.title
+     state.option_count = state.option_count + 1
++    if option.visible_if then state.visibility_dependencies[option.visible_if] = true end
+     option.mod, option.sequence = title, state.option_count
+     option.descriptor, option.descriptor_block = descriptor(option)
+     mod.order[#mod.order + 1] = option
+@@ -172,7 +173,9 @@
+     if not option then return false, 'unknown option' end
+     if option.kind == 'slider' and type(value) == 'number' then value = snap(option, value) end
+     if not valid_value(option, value) then return false, 'invalid value' end
++    local before = state.values[id]
+     state.values[id] = value
++    if before ~= value and state.visibility_dependencies[id] then state.revision = state.revision + 1 end
+     set_pending(id, nil)
+     -- An unchanged value leaves the values file alone.
+     local text, saved = encode(option, value), saved_values()
+--- a/src/mod_options_menu.lua
++++ b/src/mod_options_menu.lua
+@@ -60,7 +60,7 @@
+ local state = {initialized = false, base = nil, native = nil, mods = {}, refused = {}, refused_count = 0,
+                mods_page = 0, options = {}, option_count = 0, values = {}, pending = {}, pending_count = 0,
+                queued = {}, queued_any = false, saved = nil, callbacks = {}, texts = {}, text_addresses = {},
+-               revision = 0, dirty = false, save_timer = 0, view = nil, mods_tab_logged = false, menu_seen = false,
++               revision = 0, visibility_dependencies = {}, dirty = false, save_timer = 0, view = nil, mods_tab_logged = false, menu_seen = false,
+                language = nil, mods_title = 'MODS', empty_text = 'NO MOD OPTIONS INSTALLED'}
+ 
+ -- Memory ---------------------------------------------------------------------
+--- a/src/rows.lua
++++ b/src/rows.lua
+@@ -159,7 +159,10 @@
+     local settings = get64(panel + family.settings)
+     if not valid_pointer(settings) then settings = 0 end
+     local mod = view.buttons[index + 1]
+-    local options = mod and mod.order or {}
++    local options = {}
++    for _, option in ipairs(mod and mod.order or {}) do
++        if mom.option_visible(option) then options[#options + 1] = option end
++    end
+     local count = math.min(#options, MAX_ROWS)
+     local page = {index = index, entries = {}}
+     release_rows(rows)
+--- a/src/options.lua
++++ b/src/options.lua
+@@ -238,6 +238,7 @@
+ local function changed(option, value)
+     if state.values[option.id] == value then return end
+     state.values[option.id] = value
++    if state.visibility_dependencies[option.id] then state.revision = state.revision + 1 end
+     state.saved[option.id] = encode(option, value)
+     state.dirty, state.save_timer = true, SAVE_DELAY
+     for _, callback in ipairs(state.callbacks[option.id] or {}) do
+@@ -249,10 +250,15 @@
+ -- Player edits wait for the apply action; editing back to the applied value
+ -- withdraws the edit.
+ local function set_pending(id, value)
++    local before = state.pending[id]
++    if before == nil then before = state.values[id] end
+     local had = state.pending[id] ~= nil
+     if value == state.values[id] then value = nil end
+     state.pending[id] = value
+     if had ~= (value ~= nil) then state.pending_count = state.pending_count + (had and -1 or 1) end
++    local after = value
++    if after == nil then after = state.values[id] end
++    if before ~= after and state.visibility_dependencies[id] then state.revision = state.revision + 1 end
+ end
+ 
+ -- What a row shows: the pending edit, else the applied value.
+@@ -260,6 +266,12 @@
+     local value = state.pending[option.id]
+     if value == nil then value = state.values[option.id] end
+     return value
++end
++
++local function option_visible(option)
++    if not option.visible_if then return true end
++    local parent = state.options[option.visible_if]
++    return parent ~= nil and shown_value(parent) == true
+ end
+ 
+ -- Applies every pending edit in registration order, then saves at once, as
+@@ -276,6 +288,9 @@
+ end
+ 
+ local function drop_pending()
++    for id in pairs(state.pending) do
++        if state.visibility_dependencies[id] then state.revision = state.revision + 1; break end
++    end
+     state.pending, state.pending_count = {}, 0
+ end
+ 
+@@ -340,6 +355,11 @@
+     local kind = spec.type
+     local option = {id = id, kind = kind, label = translation.resolve(spec.label, 64), gap = spec.gap == true,
+                     sources = {label = spec.label, description = spec.description, choices = {}}}
++    if spec.visible_if ~= nil then
++        if type(spec.visible_if) ~= 'string' or #spec.visible_if == 0 or #spec.visible_if > 96 or
++            spec.visible_if:find('[%c]') or spec.visible_if == id then return nil, 'invalid visible_if' end
++        option.visible_if = spec.visible_if
++    end
+     if spec.description ~= nil then
+         option.description = translation.resolve(spec.description, DESCRIPTION_LIMIT)
+         if not option.description then return nil, 'invalid description' end
+@@ -367,7 +387,7 @@
+         return type(source_x) == 'function' or type(source_y) == 'function' or x == y
+     end
+     local sa, sb = a.sources, b.sources
+-    if a.kind ~= b.kind or a.default ~= b.default or not same_text(a.label, b.label, sa.label, sb.label)
++    if a.kind ~= b.kind or a.default ~= b.default or a.visible_if ~= b.visible_if or not same_text(a.label, b.label, sa.label, sb.label)
+        or not same_text(a.description, b.description, sa.description, sb.description) then
+         return false
+     end
+@@ -388,5 +408,6 @@
+ mom.display_text, mom.saved_values, mom.encode, mom.decode = display_text, saved_values, encode, decode
+ mom.valid_value, mom.snap, mom.save_values, mom.SAVE_DELAY = valid_value, snap, save_values, SAVE_DELAY
+ mom.set_pending, mom.shown_value = set_pending, shown_value
++mom.option_visible = option_visible
+ mom.apply_pending, mom.drop_pending = apply_pending, drop_pending
+ mom.new_option, mom.same_option, mom.MAX_CHOICES = new_option, same_option, MAX_CHOICES
+--- a/scripts/build.py
++++ b/scripts/build.py
+@@ -34,7 +34,7 @@
+ 
+ 
+ HERE = Path(__file__).resolve().parents[1]
+-VERSION = "1.2"
++VERSION = "1.3"
+ LUA_NAME = "mods/cowboybingus/mod_options_menu"
+ GUID = "95ef276a-6287-465f-ac5b-8512d2227b74"
+ TEST_NAME = "mods/cowboybingus/mod_options_test"
+--- /dev/null
++++ b/tests/test_visibility.lua
+@@ -0,0 +1,44 @@
++-- Conditional rows follow pending/applied toggles and retain hidden values.
++local source=arg[1] or 'src/mod_options_menu.lua'
++local root=source:match('^(.*)[/\\]src[/\\][^/\\]+$') or '.'
++local Text=dofile(root..'/src/bingus_text.lua')
++_G.mom_text={module=Text,locales={en=dofile(root..'/locales/en.lua'),bundled={}}}
++_G.mom_files=setmetatable({}, {__index=function(files,name)
++    local chunk=assert(loadfile(root..'/src/'..name..'.lua'));rawset(files,name,chunk);return chunk
++end})
++_G.ModOptionsMenu,_G.update,_G.BingusTranslations,_G.BingusRuntime=nil,function() end,nil,nil
++_G.CowboyBingusModLoader={log_directory=(os.getenv('TEMP') or '.')..'/mom-visibility-no-folder'}
++dofile(source)
++local function upvalue(fn,name)
++    for i=1,80 do local key,value=debug.getupvalue(fn,i)
++        if key==name then return value end;if not key then break end
++    end
++    error('missing upvalue '..name)
++end
++local menu=assert(ModOptionsMenu)
++local state=upvalue(menu.register_option,'state')
++local step=upvalue(update,'step')
++local mom=upvalue(upvalue(upvalue(step,'maintain_view'),'build_page'),'mom')
++assert(menu.version==4 and menu.conditional_options)
++assert(menu.register_option('visibility.parent',{type='toggle',label='Parent',mod='Visibility',default=false}))
++local spec={type='choice',label='Child',mod='Visibility',choices={'One','Two'},default=2,visible_if='visibility.parent'}
++assert(menu.register_option('visibility.child',spec))
++assert(not mom.option_visible(state.options['visibility.child']) and menu.get('visibility.child')==2)
++local revision=state.revision
++mom.set_pending('visibility.parent',true)
++assert(state.revision>revision and mom.option_visible(state.options['visibility.child']))
++assert(menu.get('visibility.parent')==false)
++mom.drop_pending()
++assert(not mom.option_visible(state.options['visibility.child']) and menu.get('visibility.child')==2)
++assert(menu.set('visibility.parent',true) and mom.option_visible(state.options['visibility.child']))
++mom.set_pending('visibility.child',1);mom.set_pending('visibility.parent',false)
++assert(not mom.option_visible(state.options['visibility.child']))
++mom.apply_pending()
++assert(menu.get('visibility.child')==1 and menu.get('visibility.parent')==false)
++assert(menu.set('visibility.parent',true) and mom.option_visible(state.options['visibility.child']))
++assert(menu.get('visibility.child')==1)
++spec.visible_if='visibility.other'
++assert(not menu.register_option('visibility.child',spec))
++spec.visible_if='visibility.child'
++assert(not menu.register_option('visibility.child',spec))
++print('PASS conditional rows follow pending, discard, apply and set; hidden values survive')
