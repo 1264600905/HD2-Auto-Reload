@@ -14,11 +14,14 @@ local function scenario(tactical_enabled, settings)
     local state = {elapsed=0, ticks=0, latest_row=row, latest_at=0, keys={}}
     local sent, logs, fresh, focused, own_down = 0, {}, row, true, false
     local raw_keys = {}
-    local send_ok, interrupted = true, false
+    local send_ok, interrupted, on_refresh = true, false, nil
     local interrupt_flags = {}
     local api = {key_state=function(code) return raw_keys[code] or 0 end, game_focused=function() return focused end,
         own_reload_active=function() return own_down end,
-        send_reload=function(interrupt_fire)
+        send_reload=function(interrupt_fire, defer_while_firing)
+            if defer_while_firing and require('bit').band(raw_keys[0x01] or 0, 0x8000) ~= 0 then
+                return false, 'per_round_fire_held'
+            end
             interrupt_flags[#interrupt_flags+1] = interrupt_fire == true
             if not send_ok then return false,'keyup_frame_pending' end
             sent=sent+1; local was_interrupted=interrupted; interrupted=false
@@ -32,15 +35,19 @@ local function scenario(tactical_enabled, settings)
     local factory = assert(loadstring(selected_policies .. '\n' .. controller ..
         '\n' .. input_code .. '\nreturn auto_reload_step, rounds_empty, continuous_reload_step, input_probe'))
     settings = settings or {tactical_reload=tactical_enabled == true, configurable_timing=false}
-    setfenv(factory, setmetatable({reload_settings=settings, state=state, api=api,
+    local environment = setmetatable({reload_settings=settings, state=state, api=api, DEBUG=false,
         bit=require('bit'), unsafe_resources={unsafe=true},
-        context_reader=function() return fresh end,
+        context_reader=function() if on_refresh then on_refresh() end; return fresh end,
         emit=function(s) logs[#logs+1]=s end, debug_emit=function() end,
-        scalar=tostring}, {__index=_G}))
+        scalar=tostring}, {__index=_G})
+    setfenv(factory, environment)
     local step, empty, continuous, probe = factory()
     return {row=row, state=state, settings=settings, logs=logs, empty=empty,
         probe=function(t, r) state.elapsed=t; raw_keys[0x52]=r and -32768 or 0; probe() end, sent=function() return sent end,
         fresh=function(value) fresh=value end, focus=function(value) focused=value end,
+        on_refresh=function(callback) on_refresh=callback end,
+        logging=function(value) environment.DEBUG=value end,
+        hold_fire=function(value) raw_keys[0x01]=value and -32768 or 0; state.keys.LMB=value end,
         own_key=function(value) own_down=value end,
         allow_send=function(value) send_ok=value end,
         interrupted_request=function() interrupted=true end,
@@ -631,20 +638,127 @@ test('per-round last-round mode counts the chamber and triggers immediately', fu
     s.continuous_step(.02); assert(s.sent()==1)
 end)
 
-test('per-round first-shot mode uses the effective capacity and stops when full', function()
+test('per-round first-shot mode includes the chamber and stops at full total capacity', function()
     for _,capacity in ipairs({7,12,20}) do
         local s=configured_scenario(true); s.settings.per_round_threshold=3
         s.row.current_weapon_resource='dcd1c835407ef7ba'; s.row.rounds_chambered=true
         s.row.rounds_chamber_token=262; s.row.rounds_magazine_capacity=capacity
-        s.row.rounds_magazine_count=capacity; s.continuous_step(0); assert(s.sent()==0)
-        s.row.rounds_magazine_count=capacity-1; s.continuous_step(.01); assert(s.sent()==1)
-        s.own_key(true); s.continuous_step(.02); assert(s.sent()==1)
-        s.own_key(false); s.continuous_step(.09); assert(s.sent()==2)
-        s.row.rounds_magazine_count=capacity; s.continuous_step(.1); assert(s.sent()==2)
+        s.row.rounds_magazine_count=capacity-1; s.continuous_step(0); assert(s.sent()==0)
+        s.continuous_step(1); assert(s.sent()==0)
+        s.row.rounds_magazine_count=capacity-2; s.continuous_step(1.01); assert(s.sent()==1)
+        s.own_key(true); s.continuous_step(1.02); assert(s.sent()==1)
+        s.own_key(false); s.continuous_step(1.09); assert(s.sent()==2)
+        s.row.rounds_magazine_count=capacity-1; s.continuous_step(1.1); assert(s.sent()==2)
     end
     local missing=configured_scenario(true); missing.settings.per_round_threshold=3
     missing.row.current_weapon_resource='41eac4a03987faa0'; missing.row.rounds_magazine_count=7
     missing.continuous_step(0); assert(missing.sent()==0)
+end)
+
+test('first-shot total count handles an empty chamber and weapons without a chamber', function()
+    for _,chambered in ipairs({true,false}) do
+        local s=configured_scenario(true); s.settings.per_round_threshold=3
+        s.row.current_weapon_resource='41eac4a03987faa0'; s.row.rounds_chambered=chambered
+        s.row.rounds_chamber_token=chambered and 0 or 999
+        s.row.rounds_magazine_capacity=8; s.row.rounds_magazine_count=8
+        s.continuous_step(0); assert(s.sent()==0)
+        s.row.rounds_magazine_count=7; s.continuous_step(.1); assert(s.sent()==1)
+    end
+    local unknown=configured_scenario(true); unknown.settings.per_round_threshold=3
+    unknown.row.current_weapon_resource='dcd1c835407ef7ba'; unknown.row.rounds_chambered=true
+    unknown.row.rounds_magazine_capacity=7; unknown.row.rounds_magazine_count=6
+    unknown.continuous_step(0); assert(unknown.sent()==0)
+end)
+
+test('per-round fire has priority in every threshold mode and with tactical reload off', function()
+    for _,tactical in ipairs({true,false}) do
+        for _,mode in ipairs({1,2,3}) do
+            local s=configured_scenario(tactical); s.settings.per_round_threshold=mode
+            s.row.current_weapon_resource='dcd1c835407ef7ba'; s.row.rounds_chambered=true
+            s.row.rounds_magazine_capacity=7; s.row.rounds_chamber_token=tactical and 262 or 0
+            s.row.rounds_magazine_count=tactical and (mode==1 and 2 or mode==2 and 0 or 5) or 0
+            s.hold_fire(true); s.continuous_step(0); s.continuous_step(2)
+            assert(s.sent()==0 and not s.state.attempted)
+            s.hold_fire(false); s.continuous_step(2.01)
+            assert(s.sent()==1 and s.interrupt_flags[1]==false)
+            if tactical and mode~=2 then
+                s.hold_fire(true); s.continuous_step(3); assert(s.sent()==1)
+                s.hold_fire(false); s.continuous_step(3.01); assert(s.sent()==2)
+            end
+        end
+    end
+end)
+
+test('every configured per-round weapon defers held fire but AC8 and magazine weapons keep their policy', function()
+    for _,resource in ipairs({'7b75e5132ffd4ca6','e6d932be83729076','41eac4a03987faa0',
+        '4f749e2ee26f532d','4e310b1fe4c52b52','d323de60855898ac','dcd1c835407ef7ba',
+        '90ddc374f4e3d756','006e44327bb953fe','c780bcd79547da0f','df51fe8d62f294be'}) do
+        local s=configured_scenario(false); s.row.current_weapon_resource=resource
+        s.hold_fire(true); s.continuous_step(0); assert(s.sent()==0,resource)
+        s.hold_fire(false); s.continuous_step(.1)
+        assert(s.sent()==1 and s.interrupt_flags[1]==false,resource)
+    end
+    local ac8=configured_scenario(true); ac8.row.current_weapon_resource='a8cffb316f0b5c5f'
+    ac8.row.rounds_magazine_count=1; ac8.hold_fire(true); ac8.continuous_step(0)
+    assert(ac8.sent()==1 and ac8.interrupt_flags[1]==true)
+    local magazine=configured_magazine('84354339522c932d',1,0)
+    magazine.hold_fire(true); magazine.step(0)
+    assert(magazine.sent()==1 and magazine.interrupt_flags[1]==true)
+end)
+
+test('firing resumed during the fresh context read postpones both per-round request paths', function()
+    for _,mode in ipairs({1,2}) do
+        local s=configured_scenario(true); s.settings.per_round_threshold=mode
+        s.row.current_weapon_resource='dcd1c835407ef7ba'; s.row.rounds_chambered=true
+        s.row.rounds_chamber_token=262; s.row.rounds_magazine_count=mode==1 and 2 or 0
+        s.on_refresh(function() s.hold_fire(true) end)
+        s.continuous_step(0); assert(s.sent()==0 and not s.state.attempted)
+        s.on_refresh(nil); s.hold_fire(false); s.continuous_step(.1)
+        assert(s.sent()==1 and s.interrupt_flags[1]==false)
+    end
+end)
+
+test('per-round deferral is discarded after refill, focus loss or a changed fresh selection', function()
+    for _,change in ipairs({'refill','fresh_refill','focus','missing','identity'}) do
+        local s=configured_scenario(true); s.settings.per_round_threshold=3
+        s.row.current_weapon_resource='dcd1c835407ef7ba'; s.row.rounds_chambered=true
+        s.row.rounds_chamber_token=262; s.row.rounds_magazine_count=5; s.row.rounds_magazine_capacity=7
+        s.hold_fire(true); s.continuous_step(0); assert(s.sent()==0)
+        local fresh={}; for k,v in pairs(s.row) do fresh[k]=v end
+        if change=='refill' then s.row.rounds_magazine_count=6
+        elseif change=='fresh_refill' then fresh.rounds_magazine_count=6; s.fresh(fresh)
+        elseif change=='focus' then s.focus(false)
+        elseif change=='missing' then s.row.context_status='unresolved'
+        else fresh.selected_entity_id=2; s.fresh(fresh) end
+        s.hold_fire(false); s.continuous_step(.1); assert(s.sent()==0,change)
+    end
+end)
+
+test('per-round diagnostics log full ammo and fire deferral on changes without repeated full-state lines', function()
+    local s=configured_scenario(true); s.settings.per_round_threshold=3; s.logging(true)
+    s.row.current_weapon_resource='dcd1c835407ef7ba'; s.row.rounds_chambered=true
+    s.row.rounds_chamber_token=262; s.row.rounds_magazine_count=6; s.row.rounds_magazine_capacity=7
+    s.row.rounds_selected_magazine=0; s.row.rounds_config_source='entity_override'
+    local function diagnostic_lines()
+        local lines={}; for _,line in ipairs(s.logs) do
+            if line:find('PER_ROUND_STATE',1,true) then lines[#lines+1]=line end
+        end; return lines
+    end
+    s.continuous_step(0); s.continuous_step(1)
+    local lines=diagnostic_lines(); assert(#lines==1 and s.sent()==0)
+    for _,field in ipairs({'total=7','capacity=7','limit=6','basis=total','eligible=false',
+        'chamber_token=262','config_source=entity_override','action=outside_threshold'}) do
+        assert(lines[1]:find(field,1,true),field)
+    end
+    s.row.rounds_magazine_count=5; s.hold_fire(true); s.continuous_step(2); s.continuous_step(3)
+    lines=diagnostic_lines(); assert(#lines==2 and s.sent()==0)
+    assert(lines[2]:find('action=wait_for_fire_release',1,true))
+    s.hold_fire(false); s.continuous_step(3.01)
+    lines=diagnostic_lines(); assert(#lines==3 and s.sent()==1)
+    assert(lines[3]:find('action=reload_eligible',1,true))
+    s.logging(false); s.row.rounds_magazine_count=6; s.continuous_step(4)
+    assert(#diagnostic_lines()==3 and s.sent()==1)
+    s.logging(true); s.continuous_step(5); assert(#diagnostic_lines()==4 and s.sent()==1)
 end)
 
 test('per-round defaults are unchanged and do not affect magazine or AC8 policies', function()
@@ -788,6 +902,11 @@ test('mouse release precedes R in the same update and never injects a mouse pres
     now=1162; state.ticks=3; assert(api.release_reload())
     state.ticks=4
     assert(api.send_reload(true) and events[8]=='mouse_up' and events[9]=='R_down')
+    now=1243; state.ticks=5; assert(api.release_reload())
+    state.ticks=6; local previous=#events
+    local allowed,detail=api.send_reload(false,true)
+    assert(not allowed and detail=='per_round_fire_held' and #events==previous)
+    held=false; assert(api.send_reload(false,true) and events[previous+1]=='R_down')
 end)
 
 test('scan-code press spans frames and failed keyup is retried', function()

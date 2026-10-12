@@ -151,6 +151,21 @@ for _,target in ipairs({
     assert(vehicle._selection_bytes and vehicle.memory_bytes<32768)
 end
 print('PASS all three supported vehicle weapons resolve through the local avatar, not inventory')
+s=mounted('df51fe8d62f294be',10,0,6,'weapon_rounds')
+s.map(0xc00068,42,0);s.put(0xc000a8,ptr(0xc40000))
+s.put(0xc40000,string.rep('\0',0x88));s.put(0xc40048,ffi.string(ffi.new('float[2]',7,12),8))
+s.put(0xc40068,'\1');s.put(0xc20010,word(262))
+row=assert(s.run())
+assert(row.rounds_magazine_capacity==7 and row.rounds_config_source=='entity_override')
+assert(row.rounds_magazine_count==6 and row.rounds_chambered and row.rounds_chamber_token==262)
+s.put(0xc30004,word(1));s.put(0xc20008,word(11));row=assert(s.run())
+assert(row.rounds_magazine_capacity==12 and row.rounds_magazine_count==11)
+print('PASS per-round capacity and chamber use the effective override and selected magazine')
+for _,invalid in ipairs({0,-1,8.5,math.huge,0/0}) do
+    s.put(0xc4004c,ffi.string(ffi.new('float[1]',invalid),4))
+    assert(s.run().rounds_magazine_capacity==nil)
+end
+print('PASS nonpositive, fractional and nonfinite capacities are rejected')
 s=mounted('df51fe8d62f294be',10,0,5,'weapon_rounds')
 s.put(0x720008,word(3));assert(s.run().context_status=='vehicle_role_unsupported')
 s.put(0x720008,word(4));s.put(0x720030,word(1));assert(s.run().context_status=='vehicle_seat_transition')

@@ -12,7 +12,7 @@ local SPEARGUN_RESOURCE = '3828e2051aa9e897'
 local SPEARGUN_RETRY_DELAYS = {0.25, 0.5, 1.0}
 local INTERRUPTED_RETRY_DELAYS = {1.0, 2.0}
 -- RELOAD_CONFIG_INSERT
-local state = {revision = 'auto-reload-0.6.8',
+local state = {revision = 'auto-reload-0.6.9',
     ticks = 0, elapsed = 0, snapshots = 0,
     latest_row = nil,
     lmb_edge_time = nil, empty_since = nil, attempted = false, identity = nil,
@@ -178,10 +178,14 @@ local function read_api()
         debug_emit('DEBUG_RELEASE_ATTACK tick=' .. state.ticks .. ' sent=' .. tostring(sent))
         return sent == 1
     end
-    function api.send_reload(interrupt_fire)
+    function api.send_reload(interrupt_fire, defer_while_firing)
         if not api.game_focused() then return false, 'game_not_focused' end
         if release_at then return false, 'key_release_pending' end
         if released_tick == state.ticks then return false, 'keyup_frame_pending' end
+        -- Recheck at the input boundary: firing can resume during the ammo read.
+        if defer_while_firing and bit.band(api.key_state(0x01), 0x8000) ~= 0 then
+            return false, 'per_round_fire_held'
+        end
         -- A previous script can leave an injected R down across a reload.
         -- Always establish a released frame before a fresh automatic press.
         if bit.band(api.key_state(0x52), 0x8000) ~= 0 then
@@ -590,6 +594,7 @@ local function log_row(row, error_message, phase)
         'heat_value_bits=' .. scalar(row.heat_value_bits),
         'heat_config_source=' .. scalar(row.heat_config_source),
         'selected_mag=' .. scalar(row.rounds_selected_magazine),
+        'capacity=' .. scalar(row.rounds_magazine_capacity),
         'chamber_token=' .. scalar(row.rounds_chamber_token),
         'chambered=' .. scalar(row.rounds_chambered),
         'chamber_blocked=' .. scalar(row.rounds_chamber_blocked),
@@ -705,6 +710,12 @@ local function truly_empty(row)
     return row.rounds_magazine_count == 0
 end
 
+local function per_round_weapon(row)
+    local rule = row and tactical_rules[row.current_weapon_resource]
+    -- Identify the weapon independently of the tactical switch and mode.
+    return rule ~= nil and rule.path == row.ammo_path and rule.continuous == true
+end
+
 local AC8_RESOURCE = 'a8cffb316f0b5c5f'
 local function attack_only_rule(row)
     if not row then return false end
@@ -733,7 +744,9 @@ local function tactical_rule(row)
     elseif mode == 3 then
         local capacity = row.rounds_magazine_capacity
         if type(capacity) ~= 'number' or capacity < 1 then return nil end
-        limit, basis = capacity - 1, 'magazine'
+        -- Compare the selected magazine PLUS its chamber against full capacity.
+        -- A full capacity-1 magazine with one chambered round is already full.
+        limit, basis = capacity - 1, 'total'
     else return rule end
     local key = row.current_weapon_resource .. ':' .. mode .. ':' .. limit
     alternate_rules[key] = alternate_rules[key] or {name=rule.name, path=rule.path,
@@ -751,6 +764,7 @@ local function tactical_ammo_count(row, rule)
         type(row.rounds_chambered) == 'boolean' and
         type(row.rounds_magazine_count) == 'number' then
         if rule.basis == 'total' then
+            if not row.rounds_chambered then return row.rounds_magazine_count end
             if type(row.rounds_chamber_token) == 'number' then
                 return row.rounds_magazine_count + (row.rounds_chamber_token ~= 0 and 1 or 0)
             end
@@ -784,6 +798,42 @@ local function observed_round_count(row)
     end
 end
 
+local function per_round_fire_held(row)
+    return per_round_weapon(row) and bit.band(api.key_state(0x01) or 0, 0x8000) ~= 0
+end
+
+local function log_per_round_state(row, rule, count, eligible)
+    if not DEBUG or not per_round_weapon(row) then
+        state.per_round_debug_key = nil
+        return
+    end
+    local held = per_round_fire_held(row)
+    local total = observed_round_count(row)
+    local action = eligible and (held and 'wait_for_fire_release' or 'reload_eligible') or 'outside_threshold'
+    local fields = {
+        'resource=' .. scalar(row.current_weapon_resource),
+        'entity=' .. scalar(row.selected_entity_id), 'slot=' .. scalar(row.selected_slot),
+        'weapon_context=' .. scalar(row.weapon_context),
+        'tactical=' .. tostring(reload_settings.tactical_reload),
+        'mode=' .. scalar(reload_settings.per_round_threshold or 1),
+        'selected_mag=' .. scalar(row.rounds_selected_magazine),
+        'mag=' .. scalar(row.rounds_magazine_count),
+        'chambered=' .. scalar(row.rounds_chambered),
+        'chamber_token=' .. scalar(row.rounds_chamber_token),
+        'chamber_blocked=' .. scalar(row.rounds_chamber_blocked),
+        'total=' .. scalar(total), 'capacity=' .. scalar(row.rounds_magazine_capacity),
+        'config_source=' .. scalar(row.rounds_config_source),
+        'basis=' .. scalar(rule and (rule.basis or 'magazine')),
+        'count=' .. scalar(count), 'limit=' .. scalar(rule and rule.limit),
+        'eligible=' .. tostring(eligible), 'lmb=' .. tostring(held), 'action=' .. action,
+    }
+    local key = table.concat(fields, ' ')
+    if key ~= state.per_round_debug_key then
+        state.per_round_debug_key = key
+        emit(string.format('PER_ROUND_STATE tick=%d elapsed=%.3f ', state.ticks, state.elapsed) .. key)
+    end
+end
+
 local function fresh_context_matches(row, fresh)
     return rounds_empty(fresh) and fresh.weapon_owned == true and
         fresh.selected_entity_id == row.selected_entity_id and
@@ -806,6 +856,7 @@ local function reset_fire_interrupt()
 end
 
 local function reload_request(reason, expected_tactical_count)
+    if per_round_fire_held(state.latest_row) then return end
     debug_emit(string.format('DEBUG_RELOAD_ENTER tick=%d elapsed=%.3f reason=%s resource=%s',
         state.ticks, state.elapsed, reason,
         tostring(state.latest_row and state.latest_row.current_weapon_resource)))
@@ -843,9 +894,10 @@ local function reload_request(reason, expected_tactical_count)
     end
     debug_emit(string.format('DEBUG_RELOAD_SEND_BEGIN tick=%d elapsed=%.3f',
         state.ticks, state.elapsed))
+    local per_round = per_round_weapon(fresh)
     local interrupt_fire = fresh.weapon_context == 'on_foot' and
-        not attack_only_rule(fresh)
-    local ok, detail, interrupted = api.send_reload(interrupt_fire)
+        not attack_only_rule(fresh) and not per_round
+    local ok, detail, interrupted = api.send_reload(interrupt_fire, per_round)
     debug_emit(string.format('DEBUG_RELOAD_SEND_END tick=%d elapsed=%.3f ok=%s detail=%s',
         state.ticks, state.elapsed, tostring(ok), tostring(detail)))
     emit(string.format(
@@ -890,6 +942,7 @@ local function auto_reload_step()
         state.critical_one_requested = false
         state.critical_zero_requested = false
         state.tactical_sent_generation = nil
+        state.per_round_debug_key = nil
         reset_speargun_retries()
         reset_fire_interrupt()
         return
@@ -913,6 +966,7 @@ local function auto_reload_step()
     local count = tactical_ammo_count(row, rule)
     local eligible = rounds_empty(row)
     local ammo = observed_round_count(row)
+    log_per_round_state(row, rule, count, eligible)
     if not eligible or (state.interrupted_ammo and ammo and ammo > state.interrupted_ammo) then
         reset_fire_interrupt()
     end
@@ -1038,6 +1092,7 @@ local function continuous_reload_step()
     end
     if api.own_reload_active and api.own_reload_active() then return end
     if count == 1 then return end
+    if per_round_fire_held(row) then return end
     local identity = tostring(row.current_weapon_resource) .. ':' .. tostring(row.selected_entity_id) ..
         ':' .. tostring(row.selected_slot) .. ':' .. tostring(row._weapon_bytes) .. ':' .. tostring(row.local_entity_id) ..
         ':' .. tostring(row.weapon_context) .. ':' .. tostring(row._selection_bytes)
@@ -1059,8 +1114,7 @@ local function continuous_reload_step()
     end
     debug_emit(string.format('DEBUG_CONTINUOUS_SEND_BEGIN tick=%d elapsed=%.3f',
         state.ticks, state.elapsed))
-    local ok, detail = api.send_reload(fresh.weapon_context == 'on_foot' and
-        not attack_only_rule(fresh))
+    local ok, detail = api.send_reload(false, true)
     debug_emit(string.format('DEBUG_CONTINUOUS_SEND_END tick=%d elapsed=%.3f ok=%s detail=%s',
         state.ticks, state.elapsed, tostring(ok), tostring(detail)))
     emit(string.format(

@@ -9,8 +9,8 @@ local D='liu.auto_reload.reload_delay'
 local L='liu.auto_reload.logging'
 local function binding(tactical,menu)
     local globals={ModOptionsMenu=menu}
-    local state={revision='auto-reload-0.6.8',identity='old',attempted=true,empty_since=1,attack_interrupted=true,
-        interrupted_retry_at=2,speargun_retry_at=3,continuous_identity='old'}
+    local state={revision='auto-reload-0.6.9',identity='old',attempted=true,empty_since=1,attack_interrupted=true,
+        interrupted_retry_at=2,speargun_retry_at=3,continuous_identity='old',per_round_debug_key='old'}
     local logs={}
     local factory=assert(loadstring(source..'\nreturn sync_mod_options,reload_settings'))
     setfenv(factory,setmetatable({_G=globals,state=state,ENABLE_TACTICAL_RELOAD=tactical==true,
@@ -19,7 +19,7 @@ local function binding(tactical,menu)
     return {sync=sync,settings=settings,state=state,logs=logs,globals=globals}
 end
 local function mock(values,refused)
-    local menu={api=1,version=4,conditional_options=true,specs={},values=values or {},calls=0}
+    local menu={api=1,version=3,specs={},values=values or {},calls=0}
     menu.register_option=function(id,spec)
         menu.calls=menu.calls+1;if refused==id or refused=='all' then return false,'refused' end
         menu.specs[id]=spec;if menu.values[id]==nil then menu.values[id]=spec.default end;return true
@@ -34,7 +34,7 @@ test('without a menu timing stays immediate and tactical defaults stay intact',f
         assert(b.settings.per_round_threshold==1 and b.settings.ac8_threshold==1 and #b.logs==0)
     end
 end)
-test('five bilingual options register once; logging is independent and tactical children are conditional',function()
+test('five bilingual options register once and remain visible with tactical reload off',function()
     local menu=mock();local b=binding(false,menu);b.sync();b.sync()
     assert(menu.calls==5 and menu.specs[D]==nil and #b.logs==1)
     assert(menu.specs[L].visible_if==nil and menu.specs[L].default==false)
@@ -43,7 +43,7 @@ test('five bilingual options register once; logging is independent and tactical 
     assert(menu.specs[S].label=='换弹不阻止开火/Reload Does Not Block Firing')
     for id,spec in pairs(menu.specs) do
         assert(spec.label:find('/',1,true) and spec.mod=='自动换弹/Auto Reload')
-        if id~=T and id~=L then assert(spec.visible_if==T) end
+        assert(spec.visible_if==nil)
         for _,choice in ipairs(spec.choices or {}) do assert(choice:find('/',1,true)) end
     end
 end)
@@ -53,6 +53,7 @@ test('saved tactical and shooting flags survive; old delay is ignored',function(
     assert(b.settings.per_round_threshold==3 and b.settings.ac8_threshold==2 and b.settings.reload_delay==nil)
     assert(b.state.identity==nil and b.state.attack_interrupted==nil and b.state.interrupted_retry_at==nil)
     assert(b.state.speargun_retry_at==nil and b.state.continuous_identity==nil)
+    assert(b.state.per_round_debug_key==nil)
 end)
 test('only applied values reset controller state and choices are validated',function()
     local menu=mock();local b=binding(false,menu);b.sync();b.state.identity='current'
@@ -70,8 +71,9 @@ test('late menus, refused registrations and older menus preserve safe defaults',
     assert(menu.calls==5)
     b=binding(true,mock({[P]=3},'all'));b.sync();b.sync()
     assert(b.settings.tactical_reload and b.settings.per_round_threshold==1 and #b.logs==6)
-    menu=mock();menu.conditional_options=nil;b=binding(false,menu);b.sync()
-    assert(b.logs[1]:find('OPTIONS_VISIBILITY_UNSUPPORTED',1,true))
+    menu=mock({[T]=false,[P]=3,[A]=2});b=binding(true,menu);b.sync()
+    assert(menu.calls==5 and not b.settings.tactical_reload)
+    assert(b.settings.per_round_threshold==3 and b.settings.ac8_threshold==2 and #b.logs==1)
 end)
 test('logging changes do not rearm or cancel the active reload',function()
     local menu=mock();local b=binding(false,menu);b.sync();b.state.identity='current'
@@ -124,7 +126,21 @@ if arg and arg[1] then
         local menu=fresh_menu();local b=binding(false,menu);b.sync()
         local state=upvalue(menu.register_option,'state')
         assert(state.option_count==5 and #state.mods==1 and state.options[D]==nil)
-        assert(state.options[P].visible_if==T and state.options[A].visible_if==T)
+        local step=upvalue(update,'step')
+        local mom=upvalue(upvalue(upvalue(step,'maintain_view'),'build_page'),'mom')
+        local function assert_visible_options()
+            local current_state=upvalue(menu.register_option,'state')
+            local step=upvalue(update,'step')
+            local mom=upvalue(upvalue(upvalue(step,'maintain_view'),'build_page'),'mom')
+            for _,id in ipairs({T,L,S,P,A}) do
+                assert(current_state.options[id].visible_if==nil)
+                if type(mom.option_visible)=='function' then assert(mom.option_visible(current_state.options[id])) end
+            end
+        end
+        assert(not b.settings.tactical_reload);assert_visible_options()
+        mom.set_pending(T,true);assert_visible_options()
+        mom.set_pending(T,false);assert_visible_options()
+        mom.drop_pending()
         assert(menu.set(T,true) and menu.set(S,false) and menu.set(P,3) and menu.set(A,2) and menu.set(L,true))
         b.sync();assert(b.settings.per_round_threshold==3 and b.settings.ac8_threshold==2)
         local step=upvalue(update,'step');upvalue(step,'save_values')()
@@ -132,6 +148,9 @@ if arg and arg[1] then
         assert(b.settings.tactical_reload and not b.settings.shooting_postpones)
         assert(b.settings.per_round_threshold==3 and b.settings.ac8_threshold==2 and b.settings.reload_delay==nil)
         assert(b.settings.logging)
+        assert(menu.set(T,false));b.sync()
+        assert(not b.settings.tactical_reload and b.settings.per_round_threshold==3 and b.settings.ac8_threshold==2)
+        assert_visible_options()
         for _,suffix in ipairs({'','.bak','.tmp'}) do os.remove(path..suffix) end
     end)
 end

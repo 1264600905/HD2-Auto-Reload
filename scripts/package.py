@@ -41,13 +41,8 @@ def lua_body(name, source):
     return struct.pack('<II', len(body), 2) + body
 
 
-def build_addon(name, source, guid, output, display_name, extra_resources=None, extra_files=None):
-    sources = {name: source}
-    for key, value in (extra_resources or {}).items():
-        if key in sources:
-            raise ValueError('Duplicate resource name')
-        sources[key] = value
-    resources = sorted((resource_hash(key), lua_body(key, value)) for key, value in sources.items())
+def build_addon(name, source, guid, output, display_name, extra_files=None):
+    resources = [(resource_hash(name), lua_body(name, source))]
     count = len(resources)
     if len({key for key, _ in resources}) != count:
         raise ValueError('Resource hash collision')
@@ -63,7 +58,8 @@ def build_addon(name, source, guid, output, display_name, extra_resources=None, 
     header = struct.pack('<III20sQQ24s', 0xF0000011, 1, count, b'', offset, 0, b'')
     types = struct.pack('<IIQIIII', 0, 0, LUA_TYPE, count, 0, 16, 16)
     archive = (header + types + b''.join(entries)).ljust(data_start, b'\0') + payloads
-    description = 'Requires Bingus Shared Loader v18+ / API 1. Mod Options Menu is bundled. Enable and deploy.'
+    description = ('Requires Bingus Shared Loader v18+ / API 1. '
+                   'Install Mod Options Menu API 1 separately for in-game settings. Enable and deploy.')
     manifest = {'Version': 1, 'Guid': str(uuid.UUID(guid)), 'Name': display_name,
                 'Description': description, 'Options': [{'Name': display_name,
                 'Description': description, 'Include': ['Addon']}]}

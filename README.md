@@ -5,32 +5,34 @@
 Helldivers 2 自动换弹 Mod，依赖 **Bingus Shared Loader v18+ / API 1**。
 本仓库独立维护自动换弹源码、打包工具和测试，不包含 Loader 或其他 Mod 项目。
 
-## v0.6.8
+## v0.6.9
 
-唯一安装包为 `build/Auto-Reload-v0.6.8.zip`，内含自动换弹和 Mod Options Menu v1.3。替换旧自动换弹包，停用旧单独菜单包，保留 Bingus Shared Loader，部署后重启游戏。首次默认战术开启、日志关闭，已有保存值优先。
+唯一安装包为 `build/Auto-Reload-v0.6.9.zip`，仅包含自动换弹。替换旧自动换弹包，保留 Bingus Shared Loader；需要游戏内设置时，单独安装并启用支持 API 1 的 Mod Options Menu，部署后重启游戏。首次默认战术开启、日志关闭，已有保存值优先。未安装菜单时使用默认设置。
 
 - 22 个整弹匣武器统一在弹匣剩 1 发时战术换弹；逐发武器原阈值仍是默认值。
 - 换弹延迟固定为 0，删除延迟滑块与连续射击/点击等待。
 - **战术换弹/Tactical Reload** 是战术总开关，关闭后仍保留打空自动换弹。
 - **日志打印/Logging** 独立显示，默认关闭；关闭时停止自动换弹日志写入和打印，切换时不会重置换弹。
-- 开启战术换弹后显示 **换弹不阻止开火/Reload Does Not Block Firing**、**逐发换弹武器换弹阈值/Per-round Reload Threshold** 和 **AC-8机炮换弹阈值/AC-8 Reload Threshold**。
+- **换弹不阻止开火/Reload Does Not Block Firing**、**逐发换弹武器换弹阈值/Per-round Reload Threshold** 和 **AC-8机炮换弹阈值/AC-8 Reload Threshold** 始终显示，不随战术总开关隐藏。
 - 逐发模式：默认/Default、最后一发/Last Round、第一发/First Shot。AC-8 模式：1发战术换弹/Tactical at 1 Round、5发战术换弹/Tactical at 5 Rounds、不战术换弹/No Tactical Reload。
-- “换弹不阻止开火”只沿用旧选项的名字与保存值，不控制主动松左键。非站桩手持武器仍默认先松左键并在同一次更新内发送 R，无松键开关；换弹后需重新按下开火。
+- 第一发模式将膛内一发计入总余弹，与当前生效容量减1比较，修复“弹匣容量−1＋膛内1发”满弹状态仍反复请求的问题。SG-97 与 GL-15 已通过实机日志核对。
+- 所有现有逐发规则都在按住开火时暂停自动 R，松手后复核阈值并补弹；关闭战术换弹也遵守此规则。逐发武器不会注入左键松开事件。
+- “换弹不阻止开火”沿用旧选项的名字与保存值；其他非站桩手持武器保留原有主动松键行为，AC-8 保留独立规则。
 
-原站桩武器规则保留。AC-8 选不战术或关闭战术总开关后，须真正打空再点击开火才换弹。子选项隐藏时保存值保留；游戏行为在 APPLY 后生效。旧延迟保存值被忽略。
+原站桩武器规则保留。AC-8 选不战术或关闭战术总开关后，须真正打空再点击开火才换弹。关闭战术总开关仍保留子选项保存值；游戏行为在 APPLY 后生效。旧延迟保存值被忽略。
 
-本次只做离线检查和打包，新阈值与菜单仍待用户部署后验证。详细规则、默认值与容量读法见 [v0.6.8 菜单说明](docs/MOD_OPTIONS_0.6.8.md)。旧版记录保留在 [v0.6.6 菜单说明](docs/MOD_OPTIONS_0.6.6.md) 和 [更新记录](CHANGELOG.md)。
+用户实机反馈无明显问题；2026-10-12 日志确认 SG-97 和 GL-15 满弹停发、开火优先及松手后补弹，未发现读取错误或主动松左键。实测证据见 [日志核对记录](docs/RELOAD_LOG_ANALYSIS_2026-10-12.md)，完整更新、安装与诊断说明见 [v0.6.9 发布说明](docs/RELEASE_0.6.9.md)。其他逐发武器及最后一发模式、关闭战术开关的组合已离线覆盖，尚未全部实机验证。
 
 ## 分支与版本
 
 | 分支 | 当前版本 | 用途 |
 | --- | --- | --- |
-| [`main`](https://github.com/1264600905/HD2-Auto-Reload/tree/main) | v0.6.4 | 模拟 R 换弹主干，后续维护版本保持在 v0.7.0 以下 |
+| [`main`](https://github.com/1264600905/HD2-Auto-Reload/tree/main) | v0.6.9 | 模拟 R 换弹主干，后续维护版本保持在 v0.7.0 以下 |
 | [`native-test`](https://github.com/1264600905/HD2-Auto-Reload/tree/native-test) | v0.7.0 实验版 | 原生换弹开发与实机测试 |
 
 当前分支为 **`main`**，仅只读检查武器状态并模拟 R。原生换弹源码、构建开关、测试与说明在 `native-test` 维护；测试通过并决定正式发布后，再单独评估合入主干。
 
-当前版本为 **v0.6.4**。修复 SG-8P 等离子制裁者的 8 发提前换弹，并增加已核对 Pilot 操作位的堡垒、风暴漩涡和突破机甲支持；四项已获用户实机确认通过。规则、资源 ID、操作位范围和实测状态见 [v0.6.4 测试记录](docs/VEHICLE_RELOAD_0.6.4.md)。
+**v0.6.4 历史实测记录**：修复 SG-8P 等离子制裁者的 8 发提前换弹，并增加已核对 Pilot 操作位的堡垒、风暴漩涡和突破机甲支持；四项已获用户实机确认通过。规则、资源 ID、操作位范围和实测状态见 [v0.6.4 测试记录](docs/VEHICLE_RELOAD_0.6.4.md)。
 
 ## 功能与状态
 
@@ -46,11 +48,11 @@ Helldivers 2 自动换弹 Mod，依赖 **Bingus Shared Loader v18+ / API 1**。
 v5 已获用户实机反馈：功能测试通过，能量武器也能自动换弹。激光大炮另已只读验证未过热 → 过热锁定 → 换散热器后解锁及备用数量减少。此反馈不代表所有武器和场景均已覆盖。
 支持 Steam build `25327279` 和 `25480438`；其他游戏更新仍需重新验证。
 
-主干 **v0.6.4** 沿用 `25480438` 适配。推荐安装 `build/[战术换弹]Auto-Reload-v0.6.4-tactical.zip`，普通空仓版为 `build/[普通换弹]Auto-Reload-v0.6.4.zip`。在 Mod 管理器中替换旧包、重新部署并重启游戏。本次战术诊断包已实测 SG-8P 和三种载具自动换弹；版本适配证据见 [更新记录](docs/BUILD_25480438.md)。
+主干 **v0.6.9** 沿用 `25480438` 适配，唯一安装包为 `Auto-Reload-v0.6.9.zip`，普通空仓、战术与日志行为由游戏内设置切换。SG-8P 和三种载具的历史实测记录见上文；版本适配证据见 [更新记录](docs/BUILD_25480438.md)。
 
 ## 安装与测试
 
-从 [v0.6.4 Release](https://github.com/1264600905/HD2-Auto-Reload/releases/tag/v0.6.4) 下载，或在 `main` 按下方构建步骤生成：推荐 `[战术换弹]Auto-Reload-v0.6.4-tactical.zip`（启用武器配置，突破机甲 ≤5 发补弹），仅普通空仓换弹可选 `[普通换弹]Auto-Reload-v0.6.4.zip`。安装与修复说明见 [v0.6.4 发布说明](docs/RELEASE_0.6.4.md)。历史 v0.6.1 包不含游戏更新的适配与初始化修复；v0.7.0 包对应 `native-test` 实验分支。
+从 [v0.6.9 Release](https://github.com/1264600905/HD2-Auto-Reload/releases/tag/v0.6.9) 下载 `Auto-Reload-v0.6.9.zip`，或在 `main` 按下方构建步骤生成。游戏内设置需要单独安装支持 API 1 的 Mod Options Menu；v0.6.9 不再内置菜单，所有设置始终显示。安装与修复说明见 [v0.6.9 发布说明](docs/RELEASE_0.6.9.md)。历史 v0.6.1 包不含游戏更新的适配与初始化修复；v0.7.0 包对应 `native-test` 实验分支。
 在现用 Mod 管理器中替换旧 Auto Reload，保持只启用一份，再与 Bingus Shared Loader 一起部署。
 新版本沿用旧版 GUID，所以应替换旧包，不应并行安装。
 
@@ -61,7 +63,7 @@ v5 已获用户实机反馈：功能测试通过，能量武器也能自动换�
 资源 `11c27d3babb38956`（MG-43）曾被报告装备后崩溃；本地版已试验性启用。测试时先观察装备及空仓前的日志与稳定性，再测试空仓后的新射击点击。
 
 日志位置：`%LOCALAPPDATA%/CowboyBingus/Helldivers2/Logs/AutoReloadRounds.log`。
-v0.6.4 包版本行应含 `revision=auto-reload-0.6.4`。输入被系统接受不等于游戏完成换弹，日志会区分请求、弹药恢复与未确认结果。
+v0.6.9 包版本行应含 `revision=auto-reload-0.6.9`。输入被系统接受不等于游戏完成换弹，日志会区分请求、弹药恢复与未确认结果。
 不要将完整个人运行日志、游戏 DLL 或内存转储提交到本仓库。
 
 ## 构建
@@ -74,14 +76,14 @@ python scripts/build.py
 python scripts/build.py --game-dir '你的 Steam 游戏目录/Helldivers 2'
 ```
 
-构建始终输出 `build/Auto-Reload-v0.6.8.zip`。普通、战术、诊断行为由游戏内开关切换，不再生成不同包。构建使用相邻 `ModOptionsMenu-main` 的 v1.3 源码；可通过 `--menu-source` 指定位置。菜单修改补丁保存在 `integrations/ModOptionsMenu-v1.3-conditional.patch`。
+构建始终输出 `build/Auto-Reload-v0.6.9.zip`，只打包自动换弹资源，不需要菜单源码。普通、战术、诊断行为由单独安装的 Mod Options Menu 中的开关切换，不再生成不同包；菜单只需支持 API 1，无需条件显示功能。
 
-当前规则与选项见 [v0.6.8 菜单说明](docs/MOD_OPTIONS_0.6.8.md)。所有首次请求均零延迟；即时复核、武器身份和自有 R 释放约束仍保留。系统接受输入不代表游戏完成换弹。
+当前逐发修复与验证步骤见 [v0.6.9 说明](docs/RELEASE_0.6.9.md)，其他规则与选项见 [v0.6.8 菜单说明](docs/MOD_OPTIONS_0.6.8.md)。首次请求在条件允许时零延迟；逐发武器按住开火时等待松手。即时复核、武器身份和自有 R 释放约束仍保留。系统接受输入不代表游戏完成换弹。
 
 组件 map 以十六进制文本保存在 `data/`，构建时嵌入 Lua；运行时验证完整指纹、资源记录和实体身份。
 游戏内还会验证 DLL PE 标识，以及玩家、实体、物品栏、Rounds、Magazine 和 Heat 的已核对指令片段。v5 使用新版 Magazine/Rounds/Heat 全表指纹和定点槽位。
 
-需要排查时，在游戏 `MODS → 自动换弹/Auto Reload` 中开启 **日志打印/Logging** 并 APPLY。日志仍位于 `%LOCALAPPDATA%/CowboyBingus/Helldivers2/Logs/AutoReloadRounds.log`，启用行含 `LOGGING_ENABLED revision=auto-reload-0.6.8`。关闭后不继续写入该文件。
+需要排查时，在游戏 `MODS → 自动换弹/Auto Reload` 中开启 **日志打印/Logging** 并 APPLY。日志仍位于 `%LOCALAPPDATA%/CowboyBingus/Helldivers2/Logs/AutoReloadRounds.log`，启用行含 `LOGGING_ENABLED revision=auto-reload-0.6.9`。新 `PER_ROUND_STATE` 行在弹药、容量、设置或开火状态变化时记录总弹量、阈值和等待原因；关闭日志后不继续写入该文件。
 
 ## 测试
 
@@ -101,7 +103,7 @@ Lua 测试模拟内存和输入接口，不向 Windows 或游戏发送实际按�
 按键时序、最后一发膛内子弹、槽位、身份校验、完整静态 map 等均有覆盖。
 离线测试不能代替游戏内验证。
 
-可选真实菜单集成测试（源码目录可替换为你的 ModOptionsMenu 路径），使用独立测试目录验证选项注册、滑块步进和保存恢复，不发送按键：
+可选真实菜单集成测试（源码目录可替换为你的 ModOptionsMenu 路径），使用独立测试目录验证选项注册、始终显示和保存恢复，不发送按键：
 
 ```powershell
 New-Item -ItemType Directory -Path build/options-menu-test -Force | Out-Null

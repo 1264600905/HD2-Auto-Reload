@@ -3,7 +3,6 @@ from pathlib import Path
 import hashlib
 import argparse
 import re
-import importlib.util
 
 from package import build_addon
 
@@ -75,8 +74,6 @@ def validate_reload_config(config):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--game-dir', type=Path, help='Optional local game directory for SHA256 verification')
-    parser.add_argument('--menu-source', type=Path, default=ROOT.parent / 'ModOptionsMenu-main',
-                        help='Mod Options Menu v1.3 source to bundle in the single package')
     args = parser.parse_args()
     supported_hashes = {
         ('73374bd4e38386beb9a23bef480082b67d457ebc77485fbec5f488b4e95e201f',
@@ -101,26 +98,14 @@ def main():
     generated = source.replace(MARKER, insertion).replace(
         CONFIG_MARKER, reload_config).replace(
         OPTIONS_MARKER, (ROOT / 'src/mod_options.lua').read_text(encoding='utf-8'))
-    menu_root = args.menu_source.resolve()
-    menu_script = menu_root / 'scripts/entry.py'
-    if not menu_script.is_file():
-        raise SystemExit('Mod Options Menu v1.3 source is required; pass --menu-source')
-    spec = importlib.util.spec_from_file_location('bundled_menu_entry', menu_script)
-    menu_builder = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(menu_builder)
-    menu_entry = menu_builder.entry_text(menu_root)
-    if b'conditional_options = true' not in menu_entry:
-        raise SystemExit('Bundled menu must support conditional options (v1.3)')
     BUILD.mkdir(parents=True, exist_ok=True)
     entry = BUILD / 'auto_reload_entry.lua'
     entry.write_text(generated, encoding='utf-8', newline='\n')
-    output = BUILD / 'Auto-Reload-v0.6.8.zip'
+    output = BUILD / 'Auto-Reload-v0.6.9.zip'
     build_addon('mods/liu/auto_reload_rounds', generated.encode('utf-8'),
                 '4df5aee3-3c5d-47fc-b0e9-0a40f7988738', output,
-                'Auto Reload v0.6.8 (bundled menu; in-game tactical and logging switches)',
-                extra_resources={'mods/cowboybingus/mod_options_menu': menu_entry},
-                extra_files={'ModOptionsMenu-LICENSE.txt': (menu_root / 'LICENSE').read_bytes(),
-                             'HD2-C4-Quick-Actions-MIT.txt': (ROOT / 'LICENSES/HD2-C4-Quick-Actions-MIT.txt').read_bytes()})
+                'Auto Reload v0.6.9 (per-round chamber and firing fixes)',
+                extra_files={'HD2-C4-Quick-Actions-MIT.txt': (ROOT / 'LICENSES/HD2-C4-Quick-Actions-MIT.txt').read_bytes()})
     print('Built', output)
 
 if __name__ == '__main__':

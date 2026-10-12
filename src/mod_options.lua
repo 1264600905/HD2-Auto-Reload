@@ -16,16 +16,13 @@ local reload_options = {
         description='开启后记录输入、弹药与换弹诊断；关闭后停止本模组日志输出。/ Records input, ammo and reload diagnostics when enabled; disables this mod logging when off.'}},
     {key='shooting_postpones', id='liu.auto_reload.shooting_postpones', spec={
         type='toggle', label='换弹不阻止开火/Reload Does Not Block Firing', default=true,
-        visible_if=TACTICAL_OPTION,
-        description='此项不控制主动松开左键；换弹延迟固定为0。/ This preference does not control automatic fire release; reload delay is zero.'}},
+        description='逐发武器开火时暂停自动换弹，松手后补弹；此项不控制其他武器的主动松键。/ Per-round weapons wait for fire release; this preference does not control automatic fire release on other weapons.'}},
     {key='per_round_threshold', id='liu.auto_reload.per_round_threshold', spec={
         type='choice', label='逐发换弹武器换弹阈值/Per-round Reload Threshold', default=1,
-        visible_if=TACTICAL_OPTION,
         choices={'默认/Default', '最后一发/Last Round', '第一发/First Shot'},
-        description='默认保留原阈值；最后一发在总余弹1发时开始；第一发在打掉第一发后补弹。/ Default keeps each threshold; Last Round starts at one total round; First Shot reloads after the first shot.'}},
+        description='默认保留原阈值；最后一发按总余弹1发；第一发计入膛内弹。逐发武器松开火后才补弹。/ Default keeps each threshold; Last Round uses one total round; First Shot includes the chamber. Release fire to reload.'}},
     {key='ac8_threshold', id='liu.auto_reload.ac8_threshold', spec={
         type='choice', label='AC-8机炮换弹阈值/AC-8 Reload Threshold', default=1,
-        visible_if=TACTICAL_OPTION,
         choices={'1发战术换弹/Tactical at 1 Round', '5发战术换弹/Tactical at 5 Rounds', '不战术换弹/No Tactical Reload'},
         description='按弹匣余量触发；不战术换弹或关闭战术总开关后，须打空再按开火才换弹。/ Uses magazine rounds. No Tactical Reload, or the tactical switch off, requires a new fire press after empty.'}},
 }
@@ -42,6 +39,7 @@ local function reset_reload_settings_state()
     state.critical_one_requested, state.critical_zero_requested = false, false
     state.tactical_sent_generation = nil
     state.continuous_identity, state.continuous_probe_at = nil, nil
+    state.per_round_debug_key = nil
     state.speargun_retry_at, state.speargun_retry_count = nil, nil
     state.attack_interrupted = nil
     state.interrupted_retry_at, state.interrupted_retry_count, state.interrupted_ammo = nil, nil, nil
@@ -61,9 +59,6 @@ local function sync_mod_options()
             else
                 emit('OPTIONS_REGISTER_FAILED id=' .. option.id .. ' reason=' .. tostring(called and reason or ok))
             end
-        end
-        if not menu.conditional_options then
-            emit('OPTIONS_VISIBILITY_UNSUPPORTED requires=Mod-Options-Menu-v1.3')
         end
     end
     -- get() exposes applied values only, also including changes from set().

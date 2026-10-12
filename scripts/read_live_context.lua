@@ -10,12 +10,16 @@ int CloseHandle(void *);
 uint32_t GetLastError(void);
 void Sleep(uint32_t);
 uint64_t GetTickCount64(void);
+short GetAsyncKeyState(int);
 ]]
 local kernel = ffi.load('kernel32')
+local user32 = ffi.load('user32')
+local bit = require('bit')
 local handle = assert(kernel.OpenProcess(0x1010, 0, assert(tonumber(arg[1]))))
 assert(handle ~= nil, 'OpenProcess failed')
 local game = assert(tonumber(arg[2]))
 local api = {}
+function api.key_state(code) return tonumber(user32.GetAsyncKeyState(code)) end
 function api.read(address, size)
     assert(address >= 65536 and address + size < 0x800000000000 and size > 0 and size <= 4096)
     local buffer, count = ffi.new('uint8_t[?]',size), ffi.new('size_t[1]')
@@ -47,7 +51,10 @@ if arg[6] == 'dry-run' then
     state = {elapsed=0, ticks=0, keys={}}
     api.game_focused = function() return true end
     api.own_reload_active = function() return false end
-    api.send_reload = function()
+    api.send_reload = function(_, defer_while_firing)
+        if defer_while_firing and bit.band(api.key_state(0x01),0x8000)~=0 then
+            return false, 'per_round_fire_held'
+        end
         print('DRY_RUN_WOULD_REQUEST_R no_input_sent=true')
         return true, 'dry_run_print_only'
     end
@@ -68,13 +75,22 @@ local ok, why = pcall(function()
     for i=1,samples do
         local success,row,reason=pcall(reader,api,game)
         if success and row then
-            local fields={}
+            local fields={'sample='..i, 'elapsed_ms='..(tonumber(kernel.GetTickCount64())-start),
+                'lmb_down='..tostring(bit.band(tonumber(user32.GetAsyncKeyState(0x01)),0x8000)~=0)}
             for _,name in ipairs({'context_status','selected_slot','selected_entity_id','current_weapon_resource',
                 'weapon_context','seat_entity_id','seat_type','seat_role','seat_index',
                 'ammo_path','ammo_status','heat_verified','heat_overheated','heat_requires_replacement',
                 'heat_spares','heat_value_bits','heat_config_source','magazine_count','magazine_chamber_token',
-                'rounds_magazine_count','rounds_chamber_token','rounds_chambered','memory_reads','memory_bytes'}) do
+                'rounds_selected_magazine','rounds_magazine_count','rounds_chamber_token',
+                'rounds_chambered','rounds_chamber_blocked','rounds_magazine_capacity',
+                'rounds_config_source','memory_reads','memory_bytes'}) do
                 fields[#fields+1]=name..'='..tostring(row[name])
+            end
+            if type(row.rounds_magazine_count)=='number' and type(row.rounds_chambered)=='boolean' and
+                (not row.rounds_chambered or type(row.rounds_chamber_token)=='number') then
+                local total=row.rounds_magazine_count +
+                    (row.rounds_chambered and row.rounds_chamber_token~=0 and 1 or 0)
+                fields[#fields+1]='rounds_total_count='..total
             end
             print(table.concat(fields,' '))
         else print('CONTEXT_ERROR '..tostring(success and reason or row)) end

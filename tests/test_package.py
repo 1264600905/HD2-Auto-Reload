@@ -1,7 +1,10 @@
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import struct
+import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -41,29 +44,32 @@ class PackageTests(unittest.TestCase):
                 b'-- HD2-Addon: mods/other/mod\nreturn {}',
                 '4df5aee3-3c5d-47fc-b0e9-0a40f7988738', 'unused.zip', 'Test')
 
-    def test_one_archive_contains_reload_and_bundled_menu(self):
+    def test_build_without_menu_checkout_contains_only_reload(self):
         with tempfile.TemporaryDirectory() as folder:
-            path = Path(folder) / 'Auto-Reload.zip'
-            menu_name = 'mods/cowboybingus/mod_options_menu'
-            package.build_addon('mods/liu/auto_reload_rounds', b'return {}',
-                                '4df5aee3-3c5d-47fc-b0e9-0a40f7988738', path, 'Auto Reload',
-                                extra_resources={menu_name: b'return {version=4}'})
+            checkout = Path(folder) / 'auto-reload'
+            for name in ('scripts', 'src', 'data', 'LICENSES'):
+                shutil.copytree(ROOT / name, checkout / name,
+                                ignore=shutil.ignore_patterns('__pycache__'))
+            result = subprocess.run([sys.executable, '-B', checkout / 'scripts/build.py'],
+                                    cwd=checkout, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            path = checkout / 'build/Auto-Reload-v0.6.9.zip'
             with zipfile.ZipFile(path) as z:
+                self.assertIsNone(z.testzip())
+                self.assertNotIn('ModOptionsMenu-LICENSE.txt', z.namelist())
+                self.assertIn('HD2-C4-Quick-Actions-MIT.txt', z.namelist())
+                manifest = json.loads(z.read('manifest.json'))
+                self.assertIn('separately', manifest['Description'])
                 raw = z.read('Addon/' + package.ARCHIVE)
-                self.assertEqual(struct.unpack_from('<III', raw), (0xF0000011, 1, 2))
-                bodies = {}
-                for index in range(2):
-                    entry = struct.unpack_from('<7Q6I', raw, 104 + index * 80)
-                    start, size = entry[2], entry[7]
-                    self.assertEqual(start % 16, 0)
-                    length, mode = struct.unpack_from('<II', raw, start)
-                    body = raw[start + 8:start + size]
-                    self.assertEqual((length, mode), (len(body), 2))
-                    bodies[entry[0]] = body
-                self.assertIn(package.resource_hash(menu_name), bodies)
-                self.assertIn(package.resource_hash('mods/liu/auto_reload_rounds'), bodies)
-                self.assertTrue(bodies[package.resource_hash(menu_name)].startswith(
-                    b'-- HD2-Addon: mods/cowboybingus/mod_options_menu\n'))
+                self.assertEqual(struct.unpack_from('<III', raw), (0xF0000011, 1, 1))
+                entry = struct.unpack_from('<7Q6I', raw, 104)
+                self.assertEqual(entry[0], package.resource_hash('mods/liu/auto_reload_rounds'))
+                start, size = entry[2], entry[7]
+                length, mode = struct.unpack_from('<II', raw, start)
+                body = raw[start + 8:start + size]
+                self.assertEqual((length, mode), (len(body), 2))
+                self.assertEqual(body, (checkout / 'build/auto_reload_entry.lua').read_bytes())
+                self.assertNotIn(b'-- HD2-Addon: mods/cowboybingus/mod_options_menu', body)
 
 
 if __name__ == '__main__':
