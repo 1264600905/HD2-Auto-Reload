@@ -5,6 +5,7 @@ local reload_settings = {
     per_round_threshold = 1,
     ac8_threshold = 1,
     logging = false,
+    eruptor_auto_bolt = true,
 }
 local TACTICAL_OPTION = 'liu.auto_reload.tactical_reload'
 local reload_options = {
@@ -14,6 +15,9 @@ local reload_options = {
     {key='logging', id='liu.auto_reload.logging', spec={
         type='toggle', label='日志打印/Logging', default=false,
         description='开启后记录输入、弹药与换弹诊断；关闭后停止本模组日志输出。/ Records input, ammo and reload diagnostics when enabled; disables this mod logging when off.'}},
+    {key='eruptor_auto_bolt', id='liu.auto_reload.eruptor_auto_bolt', spec={
+        type='toggle', label='爆裂铳自动拉栓/Eruptor Auto Bolt', default=true,
+        description='爆裂铳需要拉栓时自动短按开火；独立于战术换弹，玩家按住开火或武器动作进行中时等待。默认开火键须为鼠标左键。/ Taps fire when the Eruptor needs cycling; waits for fire release and active actions. Independent of tactical reload. Requires left mouse fire.'}},
     {key='shooting_postpones', id='liu.auto_reload.shooting_postpones', spec={
         type='toggle', label='换弹不阻止开火/Reload Does Not Block Firing', default=true,
         description='逐发武器开火时暂停自动换弹，松手后补弹；此项不控制其他武器的主动松键。/ Per-round weapons wait for fire release; this preference does not control automatic fire release on other weapons.'}},
@@ -43,6 +47,7 @@ local function reset_reload_settings_state()
     state.speargun_retry_at, state.speargun_retry_count = nil, nil
     state.attack_interrupted = nil
     state.interrupted_retry_at, state.interrupted_retry_count, state.interrupted_ammo = nil, nil, nil
+    state.bolt_identity, state.bolt_requested_at, state.bolt_attempts = nil, nil, nil
 end
 
 local function sync_mod_options()
@@ -83,6 +88,7 @@ local function sync_mod_options()
             ' reload_delay=0' ..
             ' shooting_postpones=' .. tostring(reload_settings.shooting_postpones) ..
             ' per_round_threshold=' .. tostring(reload_settings.per_round_threshold) ..
-            ' ac8_threshold=' .. tostring(reload_settings.ac8_threshold))
+            ' ac8_threshold=' .. tostring(reload_settings.ac8_threshold) ..
+            ' eruptor_auto_bolt=' .. tostring(reload_settings.eruptor_auto_bolt))
     end
 end

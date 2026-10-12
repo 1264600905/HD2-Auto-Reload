@@ -1,6 +1,6 @@
 -- HD2-Addon: mods/liu/auto_reload_rounds
 
--- Auto Reload for builds 25327279/25480438: read-only ammo state, native R input.
+-- Auto Reload for builds 25327279/25480438: read-only state, R and Eruptor fire input.
 -- The entity/component layout is adapted from etxp/HD2-C4-Quick-Actions
 -- (MIT); C4-specific action calls and all memory writes are deliberately removed.
 local existing = rawget(_G, 'LiuAutoReloadRounds')
@@ -11,8 +11,12 @@ local CONTINUOUS_RELOAD_INTERVAL_SECONDS = 0
 local SPEARGUN_RESOURCE = '3828e2051aa9e897'
 local SPEARGUN_RETRY_DELAYS = {0.25, 0.5, 1.0}
 local INTERRUPTED_RETRY_DELAYS = {1.0, 2.0}
+local ERUPTOR_RESOURCE = 'b6aff2195568767f'
+local ERUPTOR_BOLT_ABILITY = 2660
+local ERUPTOR_BOLT_RETRY_SECONDS = 1
+local ERUPTOR_BOLT_MAX_ATTEMPTS = 3
 -- RELOAD_CONFIG_INSERT
-local state = {revision = 'auto-reload-0.6.9',
+local state = {revision = 'auto-reload-0.6.10',
     ticks = 0, elapsed = 0, snapshots = 0,
     latest_row = nil,
     lmb_edge_time = nil, empty_since = nil, attempted = false, identity = nil,
@@ -144,8 +148,9 @@ local function read_api()
         return tonumber(owner[0]) == tonumber(process_id)
     end
     function api.key_state(code) return tonumber(get_async_key_state(code)) end
-    local release_at, released_tick
+    local release_at, released_tick, bolt_release_at, bolt_released_tick
     function api.own_reload_active() return release_at ~= nil end
+    function api.own_bolt_active() return bolt_release_at ~= nil end
     local function key_event(up)
         local input = ffi.new('uint8_t[40]')
         ffi.cast('uint32_t *', input)[0] = 1
@@ -170,16 +175,35 @@ local function read_api()
         end
         return true
     end
-    local function release_attack()
+    local function mouse_event(up, bolt)
         local input = ffi.new('uint8_t[40]')
-        -- INPUT_MOUSE / MOUSEEVENTF_LEFTUP. Do not change aim or move the mouse.
-        ffi.cast('uint32_t *', input + 20)[0] = 4
+        -- INPUT_MOUSE / LEFTDOWN or LEFTUP. Do not change aim or move the mouse.
+        ffi.cast('uint32_t *', input + 20)[0] = up and 4 or 2
         local sent = tonumber(send_input(1, input, 40))
-        debug_emit('DEBUG_RELEASE_ATTACK tick=' .. state.ticks .. ' sent=' .. tostring(sent))
+        debug_emit((bolt and (up and 'DEBUG_BOLT_RELEASE' or 'DEBUG_BOLT_PRESS') or 'DEBUG_RELEASE_ATTACK') ..
+            ' tick=' .. state.ticks .. ' sent=' .. tostring(sent))
         return sent == 1
+    end
+    function api.release_bolt(force)
+        if bolt_release_at and (force or api.now() >= bolt_release_at) then
+            if not mouse_event(true, true) then return false end
+            bolt_release_at, bolt_released_tick = nil, state.ticks
+        end
+        return true
+    end
+    function api.send_bolt()
+        if not api.game_focused() then return false, 'game_not_focused' end
+        if release_at or bolt_release_at or released_tick == state.ticks or
+            bolt_released_tick == state.ticks then return false, 'input_release_pending' end
+        if bit.band(api.key_state(0x01), 0x8000) ~= 0 or
+            bit.band(api.key_state(0x52), 0x8000) ~= 0 then return false, 'player_input_held' end
+        if not mouse_event(false, true) then return false, 'mouse_down_rejected' end
+        bolt_release_at = api.now() + 0.08
+        return true, 'mouse_down_accepted_not_bolt_confirmation'
     end
     function api.send_reload(interrupt_fire, defer_while_firing)
         if not api.game_focused() then return false, 'game_not_focused' end
+        if bolt_release_at or bolt_released_tick == state.ticks then return false, 'bolt_press_pending' end
         if release_at then return false, 'key_release_pending' end
         if released_tick == state.ticks then return false, 'keyup_frame_pending' end
         -- Recheck at the input boundary: firing can resume during the ammo read.
@@ -195,7 +219,7 @@ local function read_api()
             return false, 'stale_key_released_retry_next_frame'
         end
         if interrupt_fire and bit.band(api.key_state(0x01), 0x8000) ~= 0 then
-            if not release_attack() then return false, 'attack_release_rejected' end
+            if not mouse_event(true) then return false, 'attack_release_rejected' end
             state.attack_interrupted = true
         end
         -- Send R in this same update, immediately after the mouse release.
@@ -277,6 +301,84 @@ local function read_heat_component(e, row)
     row.heat_config_source = override and 'entity_override' or 'resource_template'
     row.ammo_status = row.heat_overheated and
         (row.heat_requires_replacement and 'heat_sink_burned_out' or 'heat_cooling_lock') or 'heat_ready'
+end
+
+local function read_eruptor_bolt_component(e, row)
+    -- Verified on build 25480438 only. Unsupported layouts disable this feature.
+    local pe = u32(e.read(e.game + 0x3c, 4), 0)
+    if u32(e.read(e.game + pe + 8, 4), 0) ~= 0x6ab3b43f then
+        row.eruptor_bolt_status = 'unsupported_build'; return
+    end
+    for _, signature in ipairs({
+        {0x777786, '8bc8498b4350448534880f95c0'}, -- Reload flags, stride 4
+        {0x77eaa4, '83b8b00400000074c2488b0dbc7fba0241b8000800008bd3e82f8cffff84c074aa'},
+        {0x786d4e, 'e86d7bffff84c0745d8bd3e81283ffff'}, -- fire -> bolt action
+        {0x50957f, '4c8b90d82bf100'}, -- effective WeaponData template map
+        {0x5095f1, '4869c1d00400004805a02d0000'}, -- stride 1232, map bytes 11680
+    }) do
+        if hex(e.read(e.game + signature[1], #signature[2] / 2)) ~= signature[2] then
+            row.eruptor_bolt_status = 'unsupported_layout'; return
+        end
+    end
+    local function component(rva, map_offset, registry_offset, entity_id, entity_bytes)
+        local manager = e.global(rva)
+        local index = e.lookup(manager + map_offset, entity_id or e.weapon_id, 65536)
+        assert(index and index < 4096, 'eruptor_component_missing_or_invalid')
+        assert(e.read(e.pointer(e.pointer(manager + registry_offset, true) + index * 8, true), 24, true) == (entity_bytes or e.weapon),
+            'eruptor_component_identity_mismatch')
+        return manager, index
+    end
+    local reload, reload_index = component(0x3326a70, 0x20, 0x38)
+    local flags = u32(e.read(e.pointer(reload + 0x50, true) + reload_index * 4, 4, true), 0)
+    local data = component(0x3326ce0, 0x30, 0x48)
+    local override = e.lookup(data + 0x70, e.weapon_id, 65536)
+    local config_address
+    if override then
+        assert(override < 4096, 'eruptor_config_index_invalid')
+        config_address = e.pointer(data + 0xb0, true) + override * 1232
+        row.eruptor_config_source = 'entity_override'
+    else
+        local table_address = e.pointer(e.owner + 0xf12bd8, true)
+        local low, high = u32(e.weapon, 0), u32(e.weapon, 4)
+        local first = ((high % 730) * (4294967296 % 730) + low % 730) % 730
+        for probe = 0, 127 do
+            local entry = e.read(table_address + ((first + probe) % 730) * 16, 16, true)
+            if entry:sub(1, 8) == e.weapon:sub(1, 8) then
+                local index = u32(entry, 8)
+                assert(index < 730, 'eruptor_template_index_invalid')
+                config_address = table_address + 730 * 16 + index * 1232
+                break
+            end
+            if u32(entry, 0) == 0 and u32(entry, 4) == 0 then break end
+        end
+        assert(config_address, 'eruptor_config_missing')
+        row.eruptor_config_source = 'resource_template'
+    end
+    local ability = u32(e.read(config_address + 0x4b0, 4, true), 0)
+    if ability ~= 2660 then row.eruptor_bolt_status = 'unverified_bolt_ability'; return end
+    local actions, action_index = component(0x3326640, 0x18, 0x30)
+    local action = e.read(e.pointer(actions + 0x38, true) + action_index * 0xe0, 32, true)
+    assert(action:byte(17) <= 1, 'eruptor_action_flag_invalid')
+    -- Native reload can run on the wielder's Ability component (0x776010).
+    assert(e.avatar_id and e.avatar, 'eruptor_avatar_missing')
+    local player_actions, player_action_index = component(0x3326640, 0x18, 0x30, e.avatar_id, e.avatar)
+    local player_action = e.read(e.pointer(player_actions + 0x38, true) + player_action_index * 0xe0, 32, true)
+    assert(player_action:byte(17) <= 1, 'eruptor_player_action_flag_invalid')
+    -- UI stack layout used by Mod Options Menu; fail closed for any open screen.
+    local ui = e.global(0x347ce28)
+    local stack = e.read(ui + 0x429c, 24, true)
+    local depth = u32(stack, 20)
+    assert(depth <= 5, 'eruptor_ui_stack_invalid')
+    row.eruptor_reload_flags = flags
+    row.eruptor_needs_bolt = bit.band(flags, 0x800) ~= 0
+    row.eruptor_bolt_ability = ability
+    row.eruptor_active_ability = u32(action, 0)
+    row.eruptor_action_active = action:byte(17) == 1
+    row.eruptor_player_action_active = player_action:byte(17) == 1
+    row.eruptor_player_active_ability = u32(player_action, 0)
+    row.eruptor_gameplay_input = depth == 0
+    row.eruptor_bolt_verified = true
+    row.eruptor_bolt_status = row.eruptor_needs_bolt and 'needs_bolt' or 'bolt_ready'
 end
 
 local function context_reader(api, game, extend)
@@ -491,6 +593,15 @@ local function context_reader(api, game, extend)
     else
         row.ammo_status = 'unknown_ammo_path'
     end
+    if row.current_weapon_resource == 'b6aff2195568767f' and row.weapon_context == 'on_foot' then
+        local ok, reason = pcall(read_eruptor_bolt_component,
+            {read=read, pointer=pointer, global=global, lookup=lookup, game=game,
+                owner=owner, weapon_id=weapon_id, weapon=weapon, avatar_id=entity_id, avatar=entity}, row)
+        if not ok then
+            row.eruptor_bolt_verified = false
+            row.eruptor_bolt_status = 'read_failed:' .. tostring(reason)
+        end
+    end
     if extend then extend(row) end
     row._weapon_bytes = weapon
     row._weapon_id = weapon_id
@@ -586,6 +697,11 @@ local function log_row(row, error_message, phase)
         'magazine_count=' .. scalar(row.magazine_count),
         'magazine_chamber=' .. scalar(row.magazine_chamber_token),
         'magazine_blocked=' .. scalar(row.magazine_chamber_blocked),
+        'bolt_status=' .. scalar(row.eruptor_bolt_status),
+        'bolt_flags=' .. scalar(row.eruptor_reload_flags),
+        'bolt_action_active=' .. scalar(row.eruptor_action_active),
+        'bolt_player_action_active=' .. scalar(row.eruptor_player_action_active),
+        'bolt_gameplay_input=' .. scalar(row.eruptor_gameplay_input),
         'magazine_verified=' .. scalar(row.magazine_verified),
         'heat_verified=' .. scalar(row.heat_verified),
         'heat_overheated=' .. scalar(row.heat_overheated),
@@ -674,7 +790,7 @@ local function input_probe()
         if state.keys == nil then state.keys = {} end
         if state.keys[name] ~= down then
             state.keys[name] = down
-            if name == 'LMB' and down then
+            if name == 'LMB' and down and not (api.own_bolt_active and api.own_bolt_active()) then
                 state.lmb_edge_time = state.elapsed
                 state.last_lmb_press_at = state.elapsed
             end
@@ -1128,6 +1244,57 @@ local function continuous_reload_step()
     end
 end
 
+local function eruptor_bolt_step()
+    local row = state.latest_row
+    local valid = reload_settings.eruptor_auto_bolt == true and row and
+        row.context_status == 'context_observed' and row.weapon_owned == true and
+        row.weapon_context == 'on_foot' and row.current_weapon_resource == ERUPTOR_RESOURCE and
+        row.eruptor_bolt_verified == true and row.eruptor_bolt_ability == ERUPTOR_BOLT_ABILITY and
+        row.eruptor_gameplay_input == true and state.latest_at and
+        state.elapsed - state.latest_at <= 0.25 and api.game_focused()
+    if not valid then
+        api.release_bolt(true)
+        state.bolt_identity, state.bolt_requested_at, state.bolt_attempts = nil, nil, nil
+        return
+    end
+    local identity = tostring(row.selected_entity_id) .. ':' .. tostring(row.selected_slot) ..
+        ':' .. tostring(row._weapon_bytes) .. ':' .. tostring(row.local_entity_id)
+    if identity ~= state.bolt_identity then
+        api.release_bolt(true)
+        state.bolt_identity, state.bolt_requested_at, state.bolt_attempts = identity, nil, 0
+    end
+    if row.eruptor_needs_bolt ~= true then
+        api.release_bolt(true)
+        if state.bolt_requested_at then
+            emit('BOLT_CONFIRMED flags_cleared=true action_active=' .. tostring(row.eruptor_action_active))
+        end
+        state.bolt_requested_at, state.bolt_attempts = nil, 0
+        return
+    end
+    if row.eruptor_action_active or row.eruptor_player_action_active ~= false then api.release_bolt(true); return end
+    if api.own_reload_active() or api.own_bolt_active() or
+        bit.band(api.key_state(0x01), 0x8000) ~= 0 or bit.band(api.key_state(0x52), 0x8000) ~= 0 then return end
+    if (state.bolt_attempts or 0) >= ERUPTOR_BOLT_MAX_ATTEMPTS or
+        (state.bolt_requested_at and state.elapsed - state.bolt_requested_at < ERUPTOR_BOLT_RETRY_SECONDS) then return end
+    -- Discard the complete fresh snapshot if any guarded pointer/state changes.
+    local ok_read, fresh = pcall(context_reader, api, game)
+    if not ok_read or not fresh or fresh.context_status ~= 'context_observed' or
+        fresh.current_weapon_resource ~= ERUPTOR_RESOURCE or fresh.weapon_owned ~= true or
+        fresh.weapon_context ~= 'on_foot' or fresh.selected_entity_id ~= row.selected_entity_id or
+        fresh.selected_slot ~= row.selected_slot or fresh._weapon_bytes ~= row._weapon_bytes or
+        fresh.local_entity_id ~= row.local_entity_id or fresh.eruptor_bolt_verified ~= true or
+        fresh.eruptor_bolt_ability ~= ERUPTOR_BOLT_ABILITY or fresh.eruptor_gameplay_input ~= true or
+        fresh.eruptor_needs_bolt ~= true or fresh.eruptor_action_active ~= false or
+        fresh.eruptor_player_action_active ~= false then return end
+    local sent, detail = api.send_bolt()
+    if sent then
+        state.bolt_requested_at = state.elapsed
+        state.bolt_attempts = (state.bolt_attempts or 0) + 1
+    end
+    emit('BOLT_REQUEST sent=' .. tostring(sent) .. ' detail=' .. tostring(detail) ..
+        ' attempts=' .. tostring(state.bolt_attempts) .. ' entity=' .. tostring(fresh.selected_entity_id))
+end
+
 emit('START revision=' .. state.revision .. ' debug=' .. tostring(DEBUG) ..
     ' tactical_reload=' .. tostring(ENABLE_TACTICAL_RELOAD) ..
     ' reload_delay=0 heat_overheat_reload=true rounds_and_magazine=true no_native_calls=true no_memory_writes=true input_injection=true')
@@ -1141,6 +1308,7 @@ local function update(dt, ...)
     if setup_ok then
         state.started_at = state.started_at or api.now()
         state.elapsed = api.now() - state.started_at
+        api.release_bolt(not api.game_focused() or not reload_settings.eruptor_auto_bolt)
         input_probe()
         api.release_reload(not api.game_focused())
         if DEBUG and state.empty_since and state.lmb_edge_time and
@@ -1160,6 +1328,7 @@ local function update(dt, ...)
         end
         auto_reload_step()
         continuous_reload_step()
+        eruptor_bolt_step()
         if trace_step then
             debug_emit(string.format('DEBUG_AUTO_STEP_END tick=%d elapsed=%.3f',
                 state.ticks, state.elapsed))
@@ -1168,4 +1337,9 @@ local function update(dt, ...)
     if original_update then return original_update(dt, ...) end
 end
 _G.update = update
+local original_shutdown = rawget(_G, 'shutdown')
+_G.shutdown = function(...)
+    if api then api.release_bolt(true); api.release_reload(true) end
+    if original_shutdown then return original_shutdown(...) end
+end
 return state

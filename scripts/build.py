@@ -101,10 +101,10 @@ def main():
     BUILD.mkdir(parents=True, exist_ok=True)
     entry = BUILD / 'auto_reload_entry.lua'
     entry.write_text(generated, encoding='utf-8', newline='\n')
-    output = BUILD / 'Auto-Reload-v0.6.9.zip'
+    output = BUILD / 'Auto-Reload-v0.6.10.zip'
     build_addon('mods/liu/auto_reload_rounds', generated.encode('utf-8'),
                 '4df5aee3-3c5d-47fc-b0e9-0a40f7988738', output,
-                'Auto Reload v0.6.9 (per-round chamber and firing fixes)',
+                'Auto Reload v0.6.10 (Eruptor automatic bolt cycling)',
                 extra_files={'HD2-C4-Quick-Actions-MIT.txt': (ROOT / 'LICENSES/HD2-C4-Quick-Actions-MIT.txt').read_bytes()})
     print('Built', output)
 

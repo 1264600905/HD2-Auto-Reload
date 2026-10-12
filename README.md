@@ -5,7 +5,19 @@
 Helldivers 2 自动换弹 Mod，依赖 **Bingus Shared Loader v18+ / API 1**。
 本仓库独立维护自动换弹源码、打包工具和测试，不包含 Loader 或其他 Mod 项目。
 
-## v0.6.9
+## v0.6.10（爆裂铳自动拉栓）
+
+安装包为 [Auto-Reload-v0.6.10.zip](https://github.com/1264600905/HD2-Auto-Reload/releases/download/v0.6.10/Auto-Reload-v0.6.10.zip)，本地构建输出位于 `build/`。替换旧自动换弹包，部署后重启游戏。保留 Bingus Shared Loader，菜单仍需单独安装支持 API 1 的 Mod Options Menu。
+
+- 新增 **爆裂铳自动拉栓/Eruptor Auto Bolt**，默认开启，独立于战术换弹开关，已有保存值优先。
+- 当前手持爆裂铳确认处于待拉栓状态时短按左键；动作进行中、玩家按住左键或 R、界面屏幕打开、失焦或上下文无效时等待。
+- 发送前重新核对武器、原生 `0x800` 标记和动作状态。标记清除后停止；未确认请求最多三次，相邻间隔至少 1 秒。
+- 拉栓功能目前仅适配已核对的 build `25480438`，默认开火键须为鼠标左键。旧版本仍保留自动换弹；不兼容的新读取路径只关闭自动拉栓。
+- 新增只读字段、输入时序和设置测试。此前手动拉栓对照已确认不消耗下一发；新包的自动输入仍待部署后实测。
+
+详细安装、诊断与验证边界见 [v0.6.10 说明](docs/RELEASE_0.6.10.md)。以下为 v0.6.9 的历史发布和验证记录。
+
+## v0.6.9（历史发布）
 
 唯一安装包为 `build/Auto-Reload-v0.6.9.zip`，仅包含自动换弹。替换旧自动换弹包，保留 Bingus Shared Loader；需要游戏内设置时，单独安装并启用支持 API 1 的 Mod Options Menu，部署后重启游戏。首次默认战术开启、日志关闭，已有保存值优先。未安装菜单时使用默认设置。
 
@@ -27,10 +39,10 @@ Helldivers 2 自动换弹 Mod，依赖 **Bingus Shared Loader v18+ / API 1**。
 
 | 分支 | 当前版本 | 用途 |
 | --- | --- | --- |
-| [`main`](https://github.com/1264600905/HD2-Auto-Reload/tree/main) | v0.6.9 | 模拟 R 换弹主干，后续维护版本保持在 v0.7.0 以下 |
+| [`main`](https://github.com/1264600905/HD2-Auto-Reload/tree/main) | v0.6.10 | 模拟 R 换弹和爆裂铳拉栓，后续维护版本保持在 v0.7.0 以下 |
 | [`native-test`](https://github.com/1264600905/HD2-Auto-Reload/tree/native-test) | v0.7.0 实验版 | 原生换弹开发与实机测试 |
 
-当前分支为 **`main`**，仅只读检查武器状态并模拟 R。原生换弹源码、构建开关、测试与说明在 `native-test` 维护；测试通过并决定正式发布后，再单独评估合入主干。
+当前分支为 **`main`**，只读检查武器状态并模拟 R；爆裂铳自动拉栓模拟一次左键短按。原生换弹源码、构建开关、测试与说明在 `native-test` 维护；测试通过并决定正式发布后，再单独评估合入主干。
 
 **v0.6.4 历史实测记录**：修复 SG-8P 等离子制裁者的 8 发提前换弹，并增加已核对 Pilot 操作位的堡垒、风暴漩涡和突破机甲支持；四项已获用户实机确认通过。规则、资源 ID、操作位范围和实测状态见 [v0.6.4 测试记录](docs/VEHICLE_RELOAD_0.6.4.md)。
 
@@ -40,7 +52,7 @@ Helldivers 2 自动换弹 Mod，依赖 **Bingus Shared Loader v18+ / API 1**。
 - 支持 WeaponRounds 与 WeaponMagazine，覆盖主手、副武器、支援武器槽位。
 - 使用弹匣/逐发弹药系统的能量武器走同一逻辑，不按武器外观过滤。
 - **散热型激光/能量武器（WeaponHeat）**：确认散热器烧毁且需要更换后立即请求 R。LAS-98 采用下述站桩武器例外，仅在烧毁锁定后重新点击射击才请求 R。正常升温、充能和可自行恢复的冷却锁定不触发。
-- 仅只读检查武器状态并模拟 R，不改弹药、不写游戏内存、不调用游戏函数。
+- 只读检查武器状态，换弹模拟 R，爆裂铳拉栓模拟左键；不改弹药、不写游戏内存、不调用游戏函数。
 - 备用弹药不足、原生动作限制等交给游戏处理。默认换弹键须为 R。
 - 可在 Mod Options Menu 中切换战术换弹，对指定武器按弹匣余量提前请求 R；保留计划 2 的高速武器阈值和其他 0 发规则。SG-97、GL-15 保留原有的弹匣加膛内一发口径。未安装菜单时也可在构建前选择默认值。
 - MG-43、GR-8 等站桩换弹武器不再按空仓计时自动请求 R，必须在确认空仓后重新点击射击。MG-43 曾被报告装备后崩溃；本地版按用户要求试验性启用其 Magazine 读取，尚未实机验证。
@@ -48,11 +60,11 @@ Helldivers 2 自动换弹 Mod，依赖 **Bingus Shared Loader v18+ / API 1**。
 v5 已获用户实机反馈：功能测试通过，能量武器也能自动换弹。激光大炮另已只读验证未过热 → 过热锁定 → 换散热器后解锁及备用数量减少。此反馈不代表所有武器和场景均已覆盖。
 支持 Steam build `25327279` 和 `25480438`；其他游戏更新仍需重新验证。
 
-主干 **v0.6.9** 沿用 `25480438` 适配，唯一安装包为 `Auto-Reload-v0.6.9.zip`，普通空仓、战术与日志行为由游戏内设置切换。SG-8P 和三种载具的历史实测记录见上文；版本适配证据见 [更新记录](docs/BUILD_25480438.md)。
+主干 **v0.6.10** 沿用 `25480438` 适配，当前安装包为 `Auto-Reload-v0.6.10.zip`，普通空仓、战术、日志与爆裂铳拉栓由游戏内设置切换。SG-8P 和三种载具的历史实测记录见上文；版本适配证据见 [更新记录](docs/BUILD_25480438.md)。
 
 ## 安装与测试
 
-从 [v0.6.9 Release](https://github.com/1264600905/HD2-Auto-Reload/releases/tag/v0.6.9) 下载 `Auto-Reload-v0.6.9.zip`，或在 `main` 按下方构建步骤生成。游戏内设置需要单独安装支持 API 1 的 Mod Options Menu；v0.6.9 不再内置菜单，所有设置始终显示。安装与修复说明见 [v0.6.9 发布说明](docs/RELEASE_0.6.9.md)。历史 v0.6.1 包不含游戏更新的适配与初始化修复；v0.7.0 包对应 `native-test` 实验分支。
+从 [v0.6.10 Release](https://github.com/1264600905/HD2-Auto-Reload/releases/tag/v0.6.10) 下载安装包，或按下方构建步骤生成本地 `Auto-Reload-v0.6.10.zip`；安装与验证说明见 [v0.6.10 说明](docs/RELEASE_0.6.10.md)。历史公开包仍可从 [v0.6.9 Release](https://github.com/1264600905/HD2-Auto-Reload/releases/tag/v0.6.9) 下载，该包没有爆裂铳自动拉栓。游戏内设置需单独安装支持 API 1 的 Mod Options Menu，所有设置始终显示。历史 v0.6.1 包不含游戏更新的适配与初始化修复；v0.7.0 包对应 `native-test` 实验分支。
 在现用 Mod 管理器中替换旧 Auto Reload，保持只启用一份，再与 Bingus Shared Loader 一起部署。
 新版本沿用旧版 GUID，所以应替换旧包，不应并行安装。
 
@@ -63,7 +75,7 @@ v5 已获用户实机反馈：功能测试通过，能量武器也能自动换�
 资源 `11c27d3babb38956`（MG-43）曾被报告装备后崩溃；本地版已试验性启用。测试时先观察装备及空仓前的日志与稳定性，再测试空仓后的新射击点击。
 
 日志位置：`%LOCALAPPDATA%/CowboyBingus/Helldivers2/Logs/AutoReloadRounds.log`。
-v0.6.9 包版本行应含 `revision=auto-reload-0.6.9`。输入被系统接受不等于游戏完成换弹，日志会区分请求、弹药恢复与未确认结果。
+v0.6.10 包版本行应含 `revision=auto-reload-0.6.10`。输入被系统接受不等于游戏完成动作，日志会区分请求、弹药恢复、拉栓标记清除与未确认结果。
 不要将完整个人运行日志、游戏 DLL 或内存转储提交到本仓库。
 
 ## 构建
@@ -76,14 +88,14 @@ python scripts/build.py
 python scripts/build.py --game-dir '你的 Steam 游戏目录/Helldivers 2'
 ```
 
-构建始终输出 `build/Auto-Reload-v0.6.9.zip`，只打包自动换弹资源，不需要菜单源码。普通、战术、诊断行为由单独安装的 Mod Options Menu 中的开关切换，不再生成不同包；菜单只需支持 API 1，无需条件显示功能。
+构建始终输出 `build/Auto-Reload-v0.6.10.zip`，只打包自动换弹资源，不需要菜单源码。普通、战术、诊断和拉栓行为由单独安装的 Mod Options Menu 中的开关切换，不再生成不同包；菜单只需支持 API 1，无需条件显示功能。
 
 当前逐发修复与验证步骤见 [v0.6.9 说明](docs/RELEASE_0.6.9.md)，其他规则与选项见 [v0.6.8 菜单说明](docs/MOD_OPTIONS_0.6.8.md)。首次请求在条件允许时零延迟；逐发武器按住开火时等待松手。即时复核、武器身份和自有 R 释放约束仍保留。系统接受输入不代表游戏完成换弹。
 
 组件 map 以十六进制文本保存在 `data/`，构建时嵌入 Lua；运行时验证完整指纹、资源记录和实体身份。
 游戏内还会验证 DLL PE 标识，以及玩家、实体、物品栏、Rounds、Magazine 和 Heat 的已核对指令片段。v5 使用新版 Magazine/Rounds/Heat 全表指纹和定点槽位。
 
-需要排查时，在游戏 `MODS → 自动换弹/Auto Reload` 中开启 **日志打印/Logging** 并 APPLY。日志仍位于 `%LOCALAPPDATA%/CowboyBingus/Helldivers2/Logs/AutoReloadRounds.log`，启用行含 `LOGGING_ENABLED revision=auto-reload-0.6.9`。新 `PER_ROUND_STATE` 行在弹药、容量、设置或开火状态变化时记录总弹量、阈值和等待原因；关闭日志后不继续写入该文件。
+需要排查时，在游戏 `MODS → 自动换弹/Auto Reload` 中开启 **日志打印/Logging** 并 APPLY。日志仍位于 `%LOCALAPPDATA%/CowboyBingus/Helldivers2/Logs/AutoReloadRounds.log`，启用行含 `LOGGING_ENABLED revision=auto-reload-0.6.10`。`PER_ROUND_STATE` 行在弹药、容量、设置或开火状态变化时记录总弹量、阈值和等待原因；拉栓诊断见 v0.6.10 说明。关闭日志后不继续写入该文件。
 
 ## 测试
 
@@ -93,6 +105,7 @@ python scripts/build.py --game-dir '你的 Steam 游戏目录/Helldivers 2'
 python scripts/build.py
 python -m unittest discover -s tests -p 'test_*.py'
 luajit tests/test_auto_reload.lua
+luajit tests/test_eruptor_bolt.lua
 luajit tests/test_mod_options.lua
 luajit tests/test_auto_reload_maps.lua
 luajit tests/test_context.lua

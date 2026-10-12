@@ -181,3 +181,54 @@ s.api.read=function(a,n)
 end
 changed,reason=s.run(s.api);assert(changed==nil and reason=='context_changed_during_read')
 print('PASS mounted weapon changed during snapshot re-read discards the entire snapshot')
+
+-- Reuse the ammo fixture, then restore the verified handheld inventory path.
+local function eruptor()
+    local s=mounted('b6aff2195568767f',1,0,3,'weapon_magazine')
+    s.map(0x700020,nil,nil)
+    s.put(s.game+0x3c,word(0x100));s.put(s.game+0x108,word(0x6ab3b43f))
+    for _,sig in ipairs({{0x777786,'8bc8498b4350448534880f95c0'},
+        {0x77eaa4,'83b8b00400000074c2488b0dbc7fba0241b8000800008bd3e82f8cffff84c074aa'},
+        {0x786d4e,'e86d7bffff84c0745d8bd3e81283ffff'},
+        {0x50957f,'4c8b90d82bf100'},{0x5095f1,'4869c1d00400004805a02d0000'}}) do s.put(s.game+sig[1],unhex(sig[2])) end
+    for _,spec in ipairs({{0x3326a70,0xd00000,0x20,0x38,0xd10000},
+        {0x3326ce0,0xe00000,0x30,0x48,0xe10000},{0x3326640,0xf00000,0x18,0x30,0xf10000}}) do
+        local rva,m,mo,ro,reg=unpack(spec)
+        s.put(s.game+rva,ptr(m));s.map(m+mo,42,0);s.put(m+ro,ptr(reg));s.put(reg,ptr(s.weapon_address))
+    end
+    s.put(0xd00050,ptr(0xd20000));s.put(0xd20000,word(0x800))
+    s.map(0xe00070,42,1);s.put(0xe000b0,ptr(0xe20000));s.put(0xe20000+1232+0x4b0,word(2660))
+    s.put(0xf00038,ptr(0xf20000));s.put(0xf20000,word(2660)..string.rep('\0',28))
+    local ability_map=ffi.new('uint64_t[1]');ffi.copy(ability_map,s.read(0xf00018,8),8)
+    s.put(tonumber(ability_map[0])+7*8,word(7)..word(1))
+    s.put(0xf10008,ptr(s.avatar_address));s.put(0xf20000+224,string.rep('\0',32))
+    s.put(s.game+0x347ce28,ptr(0x1000000));s.put(0x1000000+0x429c,string.rep('\0',24))
+    return s
+end
+s=eruptor();row=assert(s.run())
+assert(row.eruptor_bolt_verified and row.eruptor_needs_bolt and row.magazine_count==3)
+assert(row.eruptor_gameplay_input and row.eruptor_action_active==false and row.eruptor_player_action_active==false)
+assert(row.memory_reads<=768 and row.memory_bytes<=32768)
+print('PASS full handheld Eruptor chain includes guarded bolt, effective config, action and UI state')
+for _,address in ipairs({0xd20000,0xf20000+16,0xf20000+224+16,0x1000000+0x429c+20}) do
+    s=eruptor();local old_read=s.api.read;local seen=0
+    local watched=address==0xf20010 and 0xf20000 or address==0xf200f0 and 0xf200e0 or
+        address==0x100429c+20 and 0x100429c or address
+    s.api.read=function(a,n)
+        if a==watched then
+            seen=seen+1
+            if seen==2 then s.put(address,word(0)) end
+        end
+        return old_read(a,n)
+    end
+    -- Make each watched mutable field nonzero initially.
+    if address==0xf20010 or address==0xf200f0 then s.put(address,'\1')
+    elseif address==0x10042b0 then s.put(address,word(1)) end
+    local changed,why=s.run(s.api);assert(changed==nil and why=='context_changed_during_read')
+end
+print('PASS bolt flags, running actions or UI changes during final guard re-read reject the whole snapshot')
+s=eruptor();s.put(s.game+0x777786,'\0');row=assert(s.run())
+assert(row.magazine_verified and row.magazine_count==3 and not row.eruptor_bolt_verified)
+s=eruptor();s.put(s.game+0x3326a70,string.rep('\0',8));row=assert(s.run())
+assert(row.magazine_verified and row.magazine_count==3 and not row.eruptor_bolt_verified)
+print('PASS unavailable bolt layouts and components preserve the existing Eruptor ammo reader')

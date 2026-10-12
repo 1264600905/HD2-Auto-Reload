@@ -19,6 +19,10 @@
 - Mod Options Menu, by CowboyBingus, is an optional, separately installed API 1
   integration for in-game settings. Its source and Bingus Shared Runtime files
   are not included in this addon package.
+- The Eruptor's read-only UI-screen gate uses the UI stack addresses/layout
+  documented by CowboyBingus's Mod Options Menu (`src/view.lua`, Zero-Clause BSD).
+  The gate is implemented locally using this addon's guarded reader; no menu
+  mutation code, native calls, or additional menu resource is bundled.
 - LuaJIT is a separately supplied test/runtime dependency (MIT), not vendored.
 
 No repository-wide license grant is implied by publication. Third-party MIT

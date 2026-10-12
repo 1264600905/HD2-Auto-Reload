@@ -53,7 +53,7 @@ class PackageTests(unittest.TestCase):
             result = subprocess.run([sys.executable, '-B', checkout / 'scripts/build.py'],
                                     cwd=checkout, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            path = checkout / 'build/Auto-Reload-v0.6.9.zip'
+            path = checkout / 'build/Auto-Reload-v0.6.10.zip'
             with zipfile.ZipFile(path) as z:
                 self.assertIsNone(z.testzip())
                 self.assertNotIn('ModOptionsMenu-LICENSE.txt', z.namelist())
