@@ -16,7 +16,7 @@ local ERUPTOR_BOLT_ABILITY = 2660
 local ERUPTOR_BOLT_RETRY_SECONDS = 1
 local ERUPTOR_BOLT_MAX_ATTEMPTS = 3
 -- RELOAD_CONFIG_INSERT
-local state = {revision = 'auto-reload-0.6.11',
+local state = {revision = 'auto-reload-0.6.12',
     ticks = 0, elapsed = 0, snapshots = 0,
     latest_row = nil,
     lmb_edge_time = nil, empty_since = nil, attempted = false, identity = nil,
@@ -451,9 +451,8 @@ local function context_reader(api, game, extend)
     local entity_id = u32(entity, 8)
     row.local_entity_id = entity_id
 
-    -- Inventory retains the handheld selection while seated. The Pilot R path
-    -- (0xa7f674) resolves local-avatar Wieldable slot 0 via 0x786920 instead.
-    -- Read that selection without calling either function.
+    -- Gunner/Pilot reload and passenger fire resolve local-avatar Wieldable
+    -- slot 0 via 0x786920. Inventory can retain a different handheld selection.
     local seater = global(0x3326d78)
     local seat_index = lookup(seater + 0x20, entity_id, 65536)
     local weapon_id
@@ -465,23 +464,27 @@ local function context_reader(api, game, extend)
             'seater_owner_mismatch')
         local seat_address = pointer(seater + 0x48, true) + seat_index * 64
         local seat = read(seat_address, 24, true)
+        local seat_flags = read(seat_address + 0x30, 2, true)
         local seat_entity, role = u32(seat, 0), u32(seat, 8)
-        if u32(read(seat_address + 0x30, 4, true), 0) ~= 0 then
+        -- Native code tests +0x30 and +0x31 as separate bytes. +0x31 can
+        -- stay set throughout a stable passenger seat; it is not a transition.
+        row.seat_transition, row.seat_passenger_flag = seat_flags:byte(1, 2)
+        if row.seat_transition ~= 0 then
             return finish(row, 'vehicle_seat_transition')
         end
         if seat_entity ~= 0 and role ~= 0 then
-            row.weapon_context = 'vehicle'
+            row.weapon_context = role == 3 and 'vehicle_passenger' or 'vehicle'
             row.seat_entity_id, row.seat_type, row.seat_role = seat_entity, u32(seat, 4), role
             row.seat_index = u32(seat, 0x14)
-            if role ~= 4 then return finish(row, 'vehicle_role_unsupported') end
+            if role ~= 2 and role ~= 3 and role ~= 4 then return finish(row, 'vehicle_role_unsupported') end
             local wield = global(0x3326420)
             local wield_index = lookup(wield + 0x30, entity_id, 65536)
             if not wield_index then return finish(row, 'vehicle_wield_missing') end
             assert(wield_index < 4096, 'wield_index_invalid')
             local selection = read(pointer(wield + 0x60, true) + wield_index * 0x1d0, 8, true)
             weapon_id = u32(selection, 0)
-            row.selected_slot = 'vehicle_primary'
-            row._selection_bytes = seat .. selection
+            row.selected_slot = role == 3 and 'passenger_primary' or 'vehicle_primary'
+            row._selection_bytes = seat .. seat_flags .. selection
         end
     end
     if not weapon_id then
@@ -593,7 +596,8 @@ local function context_reader(api, game, extend)
     else
         row.ammo_status = 'unknown_ammo_path'
     end
-    if row.current_weapon_resource == 'b6aff2195568767f' and row.weapon_context == 'on_foot' then
+    if row.current_weapon_resource == 'b6aff2195568767f' and
+        (row.weapon_context == 'on_foot' or row.weapon_context == 'vehicle_passenger') then
         local ok, reason = pcall(read_eruptor_bolt_component,
             {read=read, pointer=pointer, global=global, lookup=lookup, game=game,
                 owner=owner, weapon_id=weapon_id, weapon=weapon, avatar_id=entity_id, avatar=entity}, row)
@@ -640,6 +644,8 @@ local function verify_layout(api, game)
         {0x4bd090, '498b4338'}, -- Seater entity registry
         {0xa7d83c, '448be849c1e5064c036e48'}, -- Seater state stride/base
         {0xa7f67d, '488b0d9c6d8a02'}, -- Wieldable global in Pilot R path
+        {0xa7e7da, '80783000'}, -- Seater transition is a single byte
+        {0xa7ebe0, '488b0d39788a024533c9'}, -- passenger Wieldable slot 0
         {0x786945, '448b59384533c98b5940'}, -- Wieldable entity map
         {0x7869f3, '4969cbd00100004b8d04b648c1e0044903c18b0c01890a'}, -- slot stride/base, primary entity
     }) do
@@ -690,6 +696,8 @@ local function log_row(row, error_message, phase)
         'weapon_context=' .. scalar(row.weapon_context),
         'seat_entity=' .. scalar(row.seat_entity_id), 'seat_type=' .. scalar(row.seat_type),
         'seat_role=' .. scalar(row.seat_role), 'seat_index=' .. scalar(row.seat_index),
+        'seat_transition=' .. scalar(row.seat_transition),
+        'seat_passenger_flag=' .. scalar(row.seat_passenger_flag),
         'resource=' .. scalar(row.current_weapon_resource), 'weapon=' .. scalar(row.current_weapon),
         'owned=' .. scalar(row.weapon_owned), 'driver_flags=' .. scalar(row.weapon_driver_flags),
         'ammo_path=' .. scalar(row.ammo_path), 'ammo_status=' .. scalar(row.ammo_status),
@@ -1011,7 +1019,7 @@ local function reload_request(reason, expected_tactical_count)
     debug_emit(string.format('DEBUG_RELOAD_SEND_BEGIN tick=%d elapsed=%.3f',
         state.ticks, state.elapsed))
     local per_round = per_round_weapon(fresh)
-    local interrupt_fire = fresh.weapon_context == 'on_foot' and
+    local interrupt_fire = (fresh.weapon_context == 'on_foot' or fresh.weapon_context == 'vehicle_passenger') and
         not attack_only_rule(fresh) and not per_round
     local ok, detail, interrupted = api.send_reload(interrupt_fire, per_round)
     debug_emit(string.format('DEBUG_RELOAD_SEND_END tick=%d elapsed=%.3f ok=%s detail=%s',
@@ -1248,7 +1256,8 @@ local function eruptor_bolt_step(periodic_check)
     local row = state.latest_row
     local valid = reload_settings.eruptor_auto_bolt == true and row and
         row.context_status == 'context_observed' and row.weapon_owned == true and
-        row.weapon_context == 'on_foot' and row.current_weapon_resource == ERUPTOR_RESOURCE and
+        (row.weapon_context == 'on_foot' or row.weapon_context == 'vehicle_passenger') and
+        row.current_weapon_resource == ERUPTOR_RESOURCE and
         row.eruptor_bolt_verified == true and row.eruptor_bolt_ability == ERUPTOR_BOLT_ABILITY and
         row.eruptor_gameplay_input == true and state.latest_at and
         state.elapsed - state.latest_at <= 0.25 and api.game_focused()
@@ -1280,7 +1289,8 @@ local function eruptor_bolt_step(periodic_check)
     local ok_read, fresh = pcall(context_reader, api, game)
     if not ok_read or not fresh or fresh.context_status ~= 'context_observed' or
         fresh.current_weapon_resource ~= ERUPTOR_RESOURCE or fresh.weapon_owned ~= true or
-        fresh.weapon_context ~= 'on_foot' or fresh.selected_entity_id ~= row.selected_entity_id or
+        fresh.weapon_context ~= row.weapon_context or fresh._selection_bytes ~= row._selection_bytes or
+        fresh.selected_entity_id ~= row.selected_entity_id or
         fresh.selected_slot ~= row.selected_slot or fresh._weapon_bytes ~= row._weapon_bytes or
         fresh.local_entity_id ~= row.local_entity_id or fresh.eruptor_bolt_verified ~= true or
         fresh.eruptor_bolt_ability ~= ERUPTOR_BOLT_ABILITY or fresh.eruptor_gameplay_input ~= true or

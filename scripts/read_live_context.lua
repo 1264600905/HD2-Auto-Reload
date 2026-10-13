@@ -79,6 +79,7 @@ local ok, why = pcall(function()
                 'lmb_down='..tostring(bit.band(tonumber(user32.GetAsyncKeyState(0x01)),0x8000)~=0)}
             for _,name in ipairs({'context_status','selected_slot','selected_entity_id','current_weapon_resource',
                 'weapon_context','seat_entity_id','seat_type','seat_role','seat_index',
+                'seat_transition','seat_passenger_flag',
                 'ammo_path','ammo_status','heat_verified','heat_overheated','heat_requires_replacement',
                 'eruptor_bolt_verified','eruptor_bolt_status','eruptor_reload_flags','eruptor_needs_bolt',
                 'eruptor_bolt_ability','eruptor_active_ability','eruptor_action_active','eruptor_gameplay_input',

@@ -90,7 +90,7 @@ def main():
                 seat_id, seat_type, role = struct.unpack_from('<III', seat)
                 result['seat'] = {'entity': seat_id, 'type': seat_type, 'role': role,
                                   'index': struct.unpack_from('<I', seat, 0x14)[0],
-                                  'transition': struct.unpack_from('<I', seat, 0x30)[0]}
+                                  'transition': seat[0x30], 'passenger_flag': seat[0x31]}
             driver = pointer(base + 0x3326660)
             count = u32(driver + 0x14)
             assert count < 4096
