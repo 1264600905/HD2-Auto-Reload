@@ -16,7 +16,7 @@ local ERUPTOR_BOLT_ABILITY = 2660
 local ERUPTOR_BOLT_RETRY_SECONDS = 1
 local ERUPTOR_BOLT_MAX_ATTEMPTS = 3
 -- RELOAD_CONFIG_INSERT
-local state = {revision = 'auto-reload-0.6.13',
+local state = {revision = 'auto-reload-1.0.0',
     ticks = 0, elapsed = 0, snapshots = 0,
     latest_row = nil,
     lmb_edge_time = nil, empty_since = nil, attempted = false, identity = nil,
