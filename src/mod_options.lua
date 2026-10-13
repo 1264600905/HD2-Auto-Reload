@@ -6,7 +6,9 @@ local reload_settings = {
     ac8_threshold = 1,
     logging = false,
     eruptor_auto_bolt = true,
+    periodic_check = 1,
 }
+local PERIODIC_CHECK_INTERVALS = {0.2, 0.5, 1.0}
 local TACTICAL_OPTION = 'liu.auto_reload.tactical_reload'
 local reload_options = {
     {key='tactical_reload', id=TACTICAL_OPTION, spec={
@@ -18,6 +20,10 @@ local reload_options = {
     {key='eruptor_auto_bolt', id='liu.auto_reload.eruptor_auto_bolt', spec={
         type='toggle', label='爆裂铳自动拉栓/Eruptor Auto Bolt', default=true,
         description='爆裂铳需要拉栓时自动短按开火；独立于战术换弹，玩家按住开火或武器动作进行中时等待。默认开火键须为鼠标左键。/ Taps fire when the Eruptor needs cycling; waits for fire release and active actions. Independent of tactical reload. Requires left mouse fire.'}},
+    {key='periodic_check', id='liu.auto_reload.periodic_check', spec={
+        type='choice', label='定期检查/Periodic Check', default=1,
+        choices={'0.2秒/0.2 s', '0.5秒/0.5 s', '1秒/1 s', '关闭/Off'},
+        description='定期复查是否仍需换弹或拉栓并重试；关闭后保留原有触发逻辑。沿用武器和输入限制，拉栓请求至少间隔1秒。/ Rechecks and retries reload or bolt cycling. Off keeps existing triggers. Weapon and input restrictions apply; bolt requests stay at least 1 s apart.'}},
     {key='shooting_postpones', id='liu.auto_reload.shooting_postpones', spec={
         type='toggle', label='换弹不阻止开火/Reload Does Not Block Firing', default=true,
         description='逐发武器开火时暂停自动换弹，松手后补弹；此项不控制其他武器的主动松键。/ Per-round weapons wait for fire release; this preference does not control automatic fire release on other weapons.'}},
@@ -48,6 +54,7 @@ local function reset_reload_settings_state()
     state.attack_interrupted = nil
     state.interrupted_retry_at, state.interrupted_retry_count, state.interrupted_ammo = nil, nil, nil
     state.bolt_identity, state.bolt_requested_at, state.bolt_attempts = nil, nil, nil
+    state.periodic_check_at = nil
 end
 
 local function sync_mod_options()
@@ -89,6 +96,8 @@ local function sync_mod_options()
             ' shooting_postpones=' .. tostring(reload_settings.shooting_postpones) ..
             ' per_round_threshold=' .. tostring(reload_settings.per_round_threshold) ..
             ' ac8_threshold=' .. tostring(reload_settings.ac8_threshold) ..
-            ' eruptor_auto_bolt=' .. tostring(reload_settings.eruptor_auto_bolt))
+            ' eruptor_auto_bolt=' .. tostring(reload_settings.eruptor_auto_bolt) ..
+            ' periodic_check=' .. tostring(reload_settings.periodic_check) ..
+            ' periodic_check_seconds=' .. tostring(PERIODIC_CHECK_INTERVALS[reload_settings.periodic_check] or 'off'))
     end
 end

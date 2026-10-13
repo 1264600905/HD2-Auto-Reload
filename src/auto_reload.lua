@@ -16,7 +16,7 @@ local ERUPTOR_BOLT_ABILITY = 2660
 local ERUPTOR_BOLT_RETRY_SECONDS = 1
 local ERUPTOR_BOLT_MAX_ATTEMPTS = 3
 -- RELOAD_CONFIG_INSERT
-local state = {revision = 'auto-reload-0.6.10',
+local state = {revision = 'auto-reload-0.6.11',
     ticks = 0, elapsed = 0, snapshots = 0,
     latest_row = nil,
     lmb_edge_time = nil, empty_since = nil, attempted = false, identity = nil,
@@ -976,7 +976,7 @@ local function reload_request(reason, expected_tactical_count)
     debug_emit(string.format('DEBUG_RELOAD_ENTER tick=%d elapsed=%.3f reason=%s resource=%s',
         state.ticks, state.elapsed, reason,
         tostring(state.latest_row and state.latest_row.current_weapon_resource)))
-    if state.attempted and reason ~= 'empty_attack' and reason ~= 'empty_retry' and reason ~= 'interrupted_retry' and reason ~= 'tactical_idle' and
+    if state.attempted and reason ~= 'empty_attack' and reason ~= 'empty_retry' and reason ~= 'empty_periodic' and reason ~= 'interrupted_retry' and reason ~= 'tactical_idle' and
         reason ~= 'tactical_last_round' and reason ~= 'tactical_zero' and reason ~= 'tactical_immediate' then
         debug_emit('DEBUG_RELOAD_SKIP reason=already_attempted')
         return
@@ -1046,7 +1046,7 @@ local function reload_request(reason, expected_tactical_count)
     return ok
 end
 
-local function auto_reload_step()
+local function auto_reload_step(periodic_check)
     local row = state.latest_row
     if not row or row.context_status ~= 'context_observed' or
         (row.ammo_path ~= 'weapon_rounds' and row.ammo_path ~= 'weapon_magazine' and row.ammo_path ~= 'weapon_heat') or row.weapon_owned ~= true or
@@ -1118,7 +1118,7 @@ local function auto_reload_step()
         if not attack_only and rule and rule.immediate and count then
             local fresh_attack = state.last_lmb_press_at and state.last_request and
                 state.last_lmb_press_at > state.last_request
-            if (state.immediate_count == nil or count < state.immediate_count or fresh_attack) and
+            if (state.immediate_count == nil or count < state.immediate_count or fresh_attack or periodic_check) and
                 not (api.own_reload_active and api.own_reload_active()) then
                 if reload_request('tactical_immediate', count) then state.immediate_count = count end
             end
@@ -1126,10 +1126,10 @@ local function auto_reload_step()
         end
         if not attack_only and rule and rule.limit == 0 and count == 0 then
             -- Zero-limit rules request immediately. A later attack press can
-            -- retry when the game did not load, without repeating each frame.
+            -- retry when the game did not load; periodic checks can also retry.
             local fresh_attack = state.last_lmb_press_at and state.last_request and
                 state.last_lmb_press_at > state.last_request
-            if (not state.critical_zero_requested or fresh_attack) and
+            if (not state.critical_zero_requested or fresh_attack or periodic_check) and
                 not (api.own_reload_active and api.own_reload_active()) then
                 if reload_request('tactical_zero', 0) then
                     state.critical_zero_requested = true
@@ -1139,9 +1139,9 @@ local function auto_reload_step()
         end
         if not attack_only and count == 1 then
             -- Give the final round priority over attack and idle timers. An
-            -- accepted R is enough for this one-round episode; a failed press
-            -- can be retried after our previous key has been released.
-            if not state.critical_one_requested and
+            -- accepted R is enough until the next periodic check; a failed
+            -- press can retry after our previous key has been released.
+            if (not state.critical_one_requested or periodic_check) and
                 not (api.own_reload_active and api.own_reload_active()) then
                 if reload_request('tactical_last_round', 1) then
                     state.critical_one_requested = true
@@ -1150,11 +1150,11 @@ local function auto_reload_step()
             return
         end
         if not attack_only and count and count > 1 and count <= rule.limit then
-            -- Magazine weapons request once per click; per-round weapons
-            -- continue in continuous_reload_step without a click delay.
+            -- Magazine weapons request per click or periodic check; per-round
+            -- weapons continue in continuous_reload_step without a click delay.
             local generation = state.last_lmb_press_at or 0
             if not rule.continuous and
-                state.tactical_sent_generation ~= generation then
+                (state.tactical_sent_generation ~= generation or periodic_check) then
                 if reload_request('tactical_idle') then
                     state.tactical_sent_generation = generation
                 end
@@ -1164,8 +1164,8 @@ local function auto_reload_step()
         if state.lmb_edge_time and state.elapsed - state.lmb_edge_time <= 0.25 and
             state.lmb_edge_time >= state.empty_since then
             if reload_request('empty_attack') then state.lmb_edge_time = nil end
-        elseif not attack_only and not state.attempted then
-            reload_request('empty_immediate')
+        elseif not attack_only and (not state.attempted or periodic_check) then
+            reload_request(state.attempted and 'empty_periodic' or 'empty_immediate')
         end
     else
         reset_speargun_retries()
@@ -1244,7 +1244,7 @@ local function continuous_reload_step()
     end
 end
 
-local function eruptor_bolt_step()
+local function eruptor_bolt_step(periodic_check)
     local row = state.latest_row
     local valid = reload_settings.eruptor_auto_bolt == true and row and
         row.context_status == 'context_observed' and row.weapon_owned == true and
@@ -1274,7 +1274,7 @@ local function eruptor_bolt_step()
     if row.eruptor_action_active or row.eruptor_player_action_active ~= false then api.release_bolt(true); return end
     if api.own_reload_active() or api.own_bolt_active() or
         bit.band(api.key_state(0x01), 0x8000) ~= 0 or bit.band(api.key_state(0x52), 0x8000) ~= 0 then return end
-    if (state.bolt_attempts or 0) >= ERUPTOR_BOLT_MAX_ATTEMPTS or
+    if ((state.bolt_attempts or 0) >= ERUPTOR_BOLT_MAX_ATTEMPTS and not periodic_check) or
         (state.bolt_requested_at and state.elapsed - state.bolt_requested_at < ERUPTOR_BOLT_RETRY_SECONDS) then return end
     -- Discard the complete fresh snapshot if any guarded pointer/state changes.
     local ok_read, fresh = pcall(context_reader, api, game)
@@ -1326,9 +1326,22 @@ local function update(dt, ...)
             debug_emit(string.format('DEBUG_AUTO_STEP_BEGIN tick=%d elapsed=%.3f',
                 state.ticks, state.elapsed))
         end
-        auto_reload_step()
+        local periodic_check = false
+        local interval = PERIODIC_CHECK_INTERVALS[reload_settings.periodic_check]
+        if interval and api.game_focused() then
+            state.periodic_check_at = state.periodic_check_at or state.elapsed
+            if state.elapsed - state.periodic_check_at >= interval then
+                state.periodic_check_at = state.elapsed
+                periodic_check = true
+            end
+        else
+            state.periodic_check_at = nil
+        end
+        -- Reuse this frame's snapshot and the existing checks before each input.
+        auto_reload_step(periodic_check and
+            (not state.last_request or state.elapsed - state.last_request >= interval))
         continuous_reload_step()
-        eruptor_bolt_step()
+        eruptor_bolt_step(periodic_check)
         if trace_step then
             debug_emit(string.format('DEBUG_AUTO_STEP_END tick=%d elapsed=%.3f',
                 state.ticks, state.elapsed))

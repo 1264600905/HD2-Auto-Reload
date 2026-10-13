@@ -88,7 +88,7 @@ def main():
     parser.add_argument('--samples', type=int, default=300)
     parser.add_argument('--interval-ms', type=int, default=100)
     parser.add_argument('--entry', type=Path, default=ROOT / 'build/auto_reload_entry.lua')
-    parser.add_argument('--output', type=Path, default=ROOT / 'build/reload-context-v0.6.10.log')
+    parser.add_argument('--output', type=Path, default=ROOT / 'build/reload-context-v0.6.11.log')
     args = parser.parse_args()
     if not 1 <= args.samples <= 100000 or not 10 <= args.interval_ms <= 60000:
         parser.error('samples must be 1..100000 and interval-ms must be 10..60000')
