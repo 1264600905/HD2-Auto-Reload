@@ -16,7 +16,7 @@ local ERUPTOR_BOLT_ABILITY = 2660
 local ERUPTOR_BOLT_RETRY_SECONDS = 1
 local ERUPTOR_BOLT_MAX_ATTEMPTS = 3
 -- RELOAD_CONFIG_INSERT
-local state = {revision = 'auto-reload-0.6.12',
+local state = {revision = 'auto-reload-0.6.13',
     ticks = 0, elapsed = 0, snapshots = 0,
     latest_row = nil,
     lmb_edge_time = nil, empty_since = nil, attempted = false, identity = nil,
@@ -62,6 +62,7 @@ local vehicle_resources = {
     ['1fa1f596769225c2'] = {seat_type=0x2b, seat_index=1, path='weapon_magazine'},
     ['d58ae6a04edb10de'] = {seat_type=0x2c, seat_index=1, path='weapon_magazine'},
     ['df51fe8d62f294be'] = {seat_type=0x0a, seat_index=0, path='weapon_rounds'},
+    ['085c1edb038ec24e'] = {seat_type=0x1a, seat_index=4, path='weapon_magazine'},
 }
 
 local function u32(bytes, offset)

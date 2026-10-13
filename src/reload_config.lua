@@ -67,6 +67,7 @@ local tactical_rules = {
     ['1fa1f596769225c2'] = {name='TD-220 Bastion cannon', path='weapon_magazine', limit=0},
     ['d58ae6a04edb10de'] = {name='TD-110 Maelstrom cannon', path='weapon_magazine', limit=0},
     ['df51fe8d62f294be'] = {name='EXO-55 Breakthrough shotgun', path='weapon_rounds', limit=5, continuous=true},
+    ['085c1edb038ec24e'] = {name='Vehicle mounted machine gun', path='weapon_magazine', limit=0},
 }
 
 -- These weapons only request R after a verified empty state and a new attack press.
