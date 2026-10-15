@@ -34,7 +34,7 @@ local reload_options = {
     {key='ac8_threshold', id='liu.auto_reload.ac8_threshold', spec={
         type='choice', label='AC-8机炮换弹阈值/AC-8 Reload Threshold', default=1,
         choices={'1发战术换弹/Tactical at 1 Round', '5发战术换弹/Tactical at 5 Rounds', '不战术换弹/No Tactical Reload'},
-        description='按弹匣余量触发；不战术换弹或关闭战术总开关后，须打空再按开火才换弹。/ Uses magazine rounds. No Tactical Reload, or the tactical switch off, requires a new fire press after empty.'}},
+        description='1发模式在弹仓0发、膛内留1发时触发；5发模式沿用弹仓5发阈值。不战术换弹或关闭战术总开关后，须打空再按开火才换弹。/ 1 Round uses magazine 0 with one chambered round; 5 Rounds uses magazine 5. No Tactical Reload requires a new fire press after empty.'}},
 }
 for _, option in ipairs(reload_options) do
     option.spec.mod, option.spec.mod_id = '自动换弹/Auto Reload', 'liu.auto_reload'

@@ -51,6 +51,7 @@ local function fixture()
     for rva,value in pairs({[0x3326468]=pm,[0x346bf98]=owner,[0x3326738]=inv,[0x3326660]=driver,[0x3326d48]=hm,
         [0x3326d78]=0x700000,[0x3326420]=0x800000}) do put(game+rva,ptr(value)) end
     map(0x700020,nil,nil)
+    map(0x800030,7,0);put(0x800060,ptr(0x810000));put(0x810000,word(42)..word(0))
     put(pm+0x84,word(1)..word(1));put(pm+0xe8,ptr(0x210000))
     put(0x210000,entity(string.rep('P',8),5,123,true));map(pm+0xd0,5,0);put(pm+0x3a8,word(123))
     map(owner+0xf22ec8,123,1);map(owner+0xf1aeb0,42,2)

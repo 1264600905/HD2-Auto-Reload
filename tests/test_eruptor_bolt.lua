@@ -229,7 +229,8 @@ test('real update starts a guarded tap, forwards the old update and releases inp
     local lifecycle=assert(source:match('(local original_update =.-)\nreturn state'))
     local factory=assert(loadstring(policies..'\n'..controller..'\n'..lifecycle..'\nreturn _G.update,_G.shutdown'))
     setfenv(factory,setmetatable({_G=globals,api=s.api,state=state,reload_settings=settings,setup_ok=true,
-        DEBUG=false,bit=bit,sync_mod_options=function() end,input_probe=function() end,
+        DEBUG=false,bit=bit,PERIODIC_CHECK_INTERVALS={.2,.5,1},
+        sync_mod_options=function() end,input_probe=function() end,
         snapshot=function() state.latest_at=state.elapsed end,context_reader=function() return state.latest_row end,
         auto_reload_step=function() end,continuous_reload_step=function() end,emit=function() end}, {__index=_G}))
     local update,shutdown=factory();local a,b=update(.016,'arg')

@@ -9,6 +9,7 @@ local ENABLE_TACTICAL_RELOAD = true -- 启用战术换弹
 local tactical_rules = {
     -- AR family (JAR-5, sentries, drones and vehicle weapons excluded).
     ['84354339522c932d'] = {name='AR-2', path='weapon_magazine', limit=1, immediate=true},
+    ['a8a91eb54892b6b2'] = {name='AR-11', path='weapon_magazine', limit=1, immediate=true},
     ['968211c0033dce64'] = {name='AR-23', path='weapon_magazine', limit=1, immediate=true},
     ['a7ee1ebf58fcdf1f'] = {name='AR-23A', path='weapon_magazine', limit=1, immediate=true},
     ['cf5f176e0e322be1'] = {name='AR-23C', path='weapon_magazine', limit=1, immediate=true},
@@ -42,6 +43,7 @@ local tactical_rules = {
     ['dbb6c961c59fadc1'] = {name='P-40-K', path='weapon_magazine', limit=0},
 
     -- WeaponRounds: use the selected magazine count unless the old total rule is explicit.
+    ['b9c209b4f99b5335'] = {name='AR-11 underbarrel shotgun', path='weapon_rounds', limit=1, basis='total', continuous=true},
     ['7b75e5132ffd4ca6'] = {name='R-2124', path='weapon_rounds', limit=2, continuous=true},
     ['e6d932be83729076'] = {name='R-6', path='weapon_rounds', limit=3, continuous=true},
     ['41eac4a03987faa0'] = {name='SG-8', path='weapon_rounds', limit=8, continuous=true},

@@ -1,6 +1,6 @@
 -- HD2-Addon: mods/liu/auto_reload_rounds
 
--- Auto Reload for builds 25327279/25480438: read-only state, R and Eruptor fire input.
+-- Auto Reload: read-only ammo, R/Eruptor input and guarded native fire consumption.
 -- The entity/component layout is adapted from etxp/HD2-C4-Quick-Actions
 -- (MIT); C4-specific action calls and all memory writes are deliberately removed.
 local existing = rawget(_G, 'LiuAutoReloadRounds')
@@ -16,7 +16,7 @@ local ERUPTOR_BOLT_ABILITY = 2660
 local ERUPTOR_BOLT_RETRY_SECONDS = 1
 local ERUPTOR_BOLT_MAX_ATTEMPTS = 3
 -- RELOAD_CONFIG_INSERT
-local state = {revision = 'auto-reload-1.0.0',
+local state = {revision = 'auto-reload-1.0.2',
     ticks = 0, elapsed = 0, snapshots = 0,
     latest_row = nil,
     lmb_edge_time = nil, empty_since = nil, attempted = false, identity = nil,
@@ -149,6 +149,40 @@ local function read_api()
         return tonumber(owner[0]) == tonumber(process_id)
     end
     function api.key_state(code) return tonumber(get_async_key_state(code)) end
+    local fire_game, consume_fire
+    function api.bind_fire_input(base)
+        -- Build 25480438: Avatar FIRE is {group=2, action=9}. This is the
+        -- merged action used by the game, including Steam Input controllers.
+        local pe = u32(assert(api.read(base + 0x3c, 4)), 0)
+        assert(pe < 0x1000, 'fire_input_pe_offset_invalid')
+        local header = assert(api.read(base + pe, 0x60))
+        assert(u32(header, 8) == 0x6ab3b43f and u32(header, 0x50) == 0x4744000,
+            'fire_input_build_unsupported')
+        for _, sig in ipairs({
+            {0x585b80, '83f90c771d4c8d0574a4a7ff8bc1418b9480a85b58004903d0ffe248c1e9208bc1c3'},
+            {0xa45514, '49bd0200000009000000498bcde85a06b4ff4c8ba42480000000448bc849c1e1054738b421681b0000'},
+            {0x12fde90, '40534883ec204c8bd14c8bca488bcae8dc7c28ff33db448bd8418bc1448bc3486bd0614c03da488b15638e020249c1e30543c6841328030000004b899c132c03000043899c1334030000'},
+            {0x12fdf0e, '488b0d03f017020f28da41b802000000498bd14883c4205be925f3ffff'},
+            {0x12fd250, '48895c240848896c2410488974241848897c24204154415641574883ec20488bf1458be0488bca488bdae8018928ff'},
+        }) do
+            assert(hex(assert(api.read(base + sig[1], #sig[2] / 2))) == sig[2],
+                string.format('fire_input_layout_mismatch_at_%x', sig[1]))
+        end
+        consume_fire = ffi.cast('void (*)(void *, uint64_t, float)', base + 0x12fde90)
+        fire_game = base
+        return true
+    end
+    local function native_fire_state()
+        if not fire_game then return false end
+        local input = api.pointer(api.read(fire_game + 0x347cf18, 8))
+        if not input then return false end
+        -- 0x328 + (2 * 97 + 9) * 32: current merged FIRE state.
+        local bytes = api.read(input + 0x1c88, 1)
+        return bytes ~= nil and bytes:byte(1) ~= 0, input
+    end
+    function api.fire_held()
+        return bit.band(api.key_state(0x01), 0x8000) ~= 0 or native_fire_state()
+    end
     local release_at, released_tick, bolt_release_at, bolt_released_tick
     function api.own_reload_active() return release_at ~= nil end
     function api.own_bolt_active() return bolt_release_at ~= nil end
@@ -196,7 +230,7 @@ local function read_api()
         if not api.game_focused() then return false, 'game_not_focused' end
         if release_at or bolt_release_at or released_tick == state.ticks or
             bolt_released_tick == state.ticks then return false, 'input_release_pending' end
-        if bit.band(api.key_state(0x01), 0x8000) ~= 0 or
+        if api.fire_held() or
             bit.band(api.key_state(0x52), 0x8000) ~= 0 then return false, 'player_input_held' end
         if not mouse_event(false, true) then return false, 'mouse_down_rejected' end
         bolt_release_at = api.now() + 0.08
@@ -208,7 +242,7 @@ local function read_api()
         if release_at then return false, 'key_release_pending' end
         if released_tick == state.ticks then return false, 'keyup_frame_pending' end
         -- Recheck at the input boundary: firing can resume during the ammo read.
-        if defer_while_firing and bit.band(api.key_state(0x01), 0x8000) ~= 0 then
+        if defer_while_firing and api.fire_held() then
             return false, 'per_round_fire_held'
         end
         -- A previous script can leave an injected R down across a reload.
@@ -219,11 +253,24 @@ local function read_api()
             -- Let the game observe keyup before retrying keydown next frame.
             return false, 'stale_key_released_retry_next_frame'
         end
-        if interrupt_fire and bit.band(api.key_state(0x01), 0x8000) ~= 0 then
-            if not mouse_event(true) then return false, 'attack_release_rejected' end
-            state.attack_interrupted = true
+        if interrupt_fire then
+            local down, input = native_fire_state()
+            if down then
+                if api.pointer(api.read(fire_game + 0x347cf18, 8)) ~= input then
+                    return false, 'fire_input_owner_changed'
+                end
+                -- Clear FIRE in all frame copies and consume it until the
+                -- player releases it. Movement, aim and other actions stay live.
+                consume_fire(ffi.cast('void *', input), ffi.new('uint64_t', 0x900000002), -1)
+                debug_emit('DEBUG_CONSUME_FIRE tick=' .. state.ticks .. ' action=2:9 until_release=true')
+                state.attack_interrupted = true
+            end
+            if bit.band(api.key_state(0x01), 0x8000) ~= 0 then
+                if not mouse_event(true) then return false, 'attack_release_rejected' end
+                state.attack_interrupted = true
+            end
         end
-        -- Send R in this same update, immediately after the mouse release.
+        -- Send R in this same update, immediately after releasing FIRE.
         if not key_event(false) then return false, 'keydown_rejected' end
         release_at = api.now() + 0.08
         local interrupted = interrupt_fire and state.attack_interrupted == true
@@ -503,6 +550,24 @@ local function context_reader(api, game, extend)
         if not slot_offsets[slot] then return finish(row, 'no_selected_weapon') end
         weapon_id = u32(inventory_state, slot_offsets[slot])
     end
+    row.weapon_mode = 'main'
+    if row.weapon_context == 'on_foot' or row.weapon_context == 'vehicle_passenger' then
+        -- The native handheld R path calls Wieldable slot 0 with prefer-alt
+        -- enabled (0xA7CA42..0xA7CA59). +4 is the active alternate entity,
+        -- not an extra magazine on the parent. This covers all underbarrels.
+        local wield = global(0x3326420)
+        local wield_index = lookup(wield + 0x30, entity_id, 65536)
+        if not wield_index then return finish(row, 'handheld_wield_missing') end
+        assert(wield_index < 4096, 'wield_index_invalid')
+        local selection = read(pointer(wield + 0x60, true) + wield_index * 0x1d0, 8, true)
+        local main, alternate = u32(selection, 0), u32(selection, 4)
+        if main ~= weapon_id then return finish(row, 'handheld_selection_transition') end
+        row._selection_bytes = (row._selection_bytes or '') .. selection
+        if alternate ~= 0 and alternate ~= INVALID then
+            row.parent_weapon_entity_id = main
+            row.weapon_mode, weapon_id = 'underbarrel', alternate
+        end
+    end
     row.selected_entity_id = weapon_id
     if weapon_id == 0 or weapon_id == INVALID then return finish(row, 'selected_entity_missing') end
 
@@ -649,6 +714,8 @@ local function verify_layout(api, game)
         {0xa7ebe0, '488b0d39788a024533c9'}, -- passenger Wieldable slot 0
         {0x786945, '448b59384533c98b5940'}, -- Wieldable entity map
         {0x7869f3, '4969cbd00100004b8d04b648c1e0044903c18b0c01890a'}, -- slot stride/base, primary entity
+        {0xa7ca42, '488b0dd7998a02488d55d0458b46104533c9c644242001e8c29ed0ff'}, -- handheld R prefers active alternate
+        {0x7869c0, '807c243000448bd84d8b4a6074254969cbd00100004b8d04b648c1e0044903c1448b540104443b1548d2cf027405448912eba6'}, -- active alternate at Wieldable +4
     }) do
         assert(hex(assert(api.read(game + signature[1], #signature[2] / 2), 'layout_code_unavailable')) ==
             signature[2], string.format('unsupported_layout_at_%x', signature[1]))
@@ -666,7 +733,10 @@ local setup_ok, setup_error = pcall(function()
     local pe = assert(api.read(game + pe_offset, 0x60), 'module_pe_unavailable')
     verify_build(pe)
     verify_layout(api, game)
-    emit(string.format('SETUP game_base=0x%X read_only=true build=25327279', game))
+    local fire_ok, fire_error = pcall(api.bind_fire_input, game)
+    emit('FIRE_INPUT_SETUP verified=' .. tostring(fire_ok) ..
+        (fire_ok and '' or ' reason=' .. tostring(fire_error)))
+    emit(string.format('SETUP game_base=0x%X ammo_read_only=true', game))
     -- One known ammo query, identified by the reference project's native
     -- analysis. Capture for offline disassembly only; never execute these bytes.
     local query = api.read(game + 0x744c20, 0x660)
@@ -695,6 +765,8 @@ local function log_row(row, error_message, phase)
         'phase=' .. scalar(phase), 'status=' .. scalar(row.context_status),
         'slot=' .. scalar(row.selected_slot), 'entity=' .. scalar(row.selected_entity_id),
         'weapon_context=' .. scalar(row.weapon_context),
+        'weapon_mode=' .. scalar(row.weapon_mode),
+        'parent_weapon_entity=' .. scalar(row.parent_weapon_entity_id),
         'seat_entity=' .. scalar(row.seat_entity_id), 'seat_type=' .. scalar(row.seat_type),
         'seat_role=' .. scalar(row.seat_role), 'seat_index=' .. scalar(row.seat_index),
         'seat_transition=' .. scalar(row.seat_transition),
@@ -799,10 +871,6 @@ local function input_probe()
         if state.keys == nil then state.keys = {} end
         if state.keys[name] ~= down then
             state.keys[name] = down
-            if name == 'LMB' and down and not (api.own_bolt_active and api.own_bolt_active()) then
-                state.lmb_edge_time = state.elapsed
-                state.last_lmb_press_at = state.elapsed
-            end
             emit(string.format('INPUT tick=%d elapsed=%.3f name=%s down=%s raw=%d',
                 state.ticks, state.elapsed, name, tostring(down), value))
             if name == 'F8' and down then
@@ -811,6 +879,15 @@ local function input_probe()
                     state.case_index, state.ticks, state.elapsed))
             end
         end
+    end
+    local down = api.fire_held and api.fire_held() or state.keys.LMB == true
+    if state.fire_down ~= down then
+        state.fire_down = down
+        if down and not (api.own_bolt_active and api.own_bolt_active()) then
+            state.lmb_edge_time, state.last_lmb_press_at = state.elapsed, state.elapsed
+        end
+        emit('INPUT tick=' .. state.ticks .. ' elapsed=' .. string.format('%.3f', state.elapsed) ..
+            ' name=FIRE down=' .. tostring(down))
     end
 end
 
@@ -835,10 +912,14 @@ local function truly_empty(row)
     return row.rounds_magazine_count == 0
 end
 
+local underbarrel_rounds_rule = {name='Underbarrel', path='weapon_rounds',
+    limit=0, basis='total', continuous=true}
+
 local function per_round_weapon(row)
     local rule = row and tactical_rules[row.current_weapon_resource]
     -- Identify the weapon independently of the tactical switch and mode.
-    return rule ~= nil and rule.path == row.ammo_path and rule.continuous == true
+    return (rule ~= nil and rule.path == row.ammo_path and rule.continuous == true) or
+        (row ~= nil and row.weapon_mode == 'underbarrel' and row.ammo_path == 'weapon_rounds')
 end
 
 local AC8_RESOURCE = 'a8cffb316f0b5c5f'
@@ -853,10 +934,16 @@ local alternate_rules = {}
 local function tactical_rule(row)
     if not reload_settings.tactical_reload or not row then return nil end
     local rule = tactical_rules[row.current_weapon_resource]
+    if not rule and row.weapon_mode == 'underbarrel' and row.ammo_path == 'weapon_rounds' then
+        -- Unknown underbarrel rounds default to empty reload; the existing
+        -- Last Round / First Shot setting can opt into earlier shell loading.
+        rule = underbarrel_rounds_rule
+    end
     if not rule or rule.path ~= row.ammo_path then return nil end
     if row.current_weapon_resource == AC8_RESOURCE then
         if reload_settings.ac8_threshold == 3 then return nil end
-        local limit = reload_settings.ac8_threshold == 2 and 5 or 1
+        -- The chamber holds the last round; magazine 0 means one round remains.
+        local limit = reload_settings.ac8_threshold == 2 and 5 or 0
         local key = AC8_RESOURCE .. ':' .. limit
         alternate_rules[key] = alternate_rules[key] or {name=rule.name, path=rule.path, limit=limit, immediate=true}
         return alternate_rules[key]
@@ -904,6 +991,7 @@ local function rounds_empty(row)
         row.current_weapon_resource == 'UNKNOWN' then return false end
     if attack_only_rule(row) then return truly_empty(row) end
     local rule = tactical_rule(row)
+    if rule == underbarrel_rounds_rule then return truly_empty(row) end
     if rule then
         local count = tactical_ammo_count(row, rule)
         if count ~= nil then return count <= rule.limit end
@@ -924,7 +1012,8 @@ local function observed_round_count(row)
 end
 
 local function per_round_fire_held(row)
-    return per_round_weapon(row) and bit.band(api.key_state(0x01) or 0, 0x8000) ~= 0
+    return per_round_weapon(row) and (api.fire_held and api.fire_held() or
+        bit.band(api.key_state(0x01) or 0, 0x8000) ~= 0)
 end
 
 local function log_per_round_state(row, rule, count, eligible)
@@ -950,7 +1039,7 @@ local function log_per_round_state(row, rule, count, eligible)
         'config_source=' .. scalar(row.rounds_config_source),
         'basis=' .. scalar(rule and (rule.basis or 'magazine')),
         'count=' .. scalar(count), 'limit=' .. scalar(rule and rule.limit),
-        'eligible=' .. tostring(eligible), 'lmb=' .. tostring(held), 'action=' .. action,
+        'eligible=' .. tostring(eligible), 'fire=' .. tostring(held), 'action=' .. action,
     }
     local key = table.concat(fields, ' ')
     if key ~= state.per_round_debug_key then
@@ -1283,7 +1372,8 @@ local function eruptor_bolt_step(periodic_check)
     end
     if row.eruptor_action_active or row.eruptor_player_action_active ~= false then api.release_bolt(true); return end
     if api.own_reload_active() or api.own_bolt_active() or
-        bit.band(api.key_state(0x01), 0x8000) ~= 0 or bit.band(api.key_state(0x52), 0x8000) ~= 0 then return end
+        (api.fire_held and api.fire_held() or bit.band(api.key_state(0x01), 0x8000) ~= 0) or
+        bit.band(api.key_state(0x52), 0x8000) ~= 0 then return end
     if ((state.bolt_attempts or 0) >= ERUPTOR_BOLT_MAX_ATTEMPTS and not periodic_check) or
         (state.bolt_requested_at and state.elapsed - state.bolt_requested_at < ERUPTOR_BOLT_RETRY_SECONDS) then return end
     -- Discard the complete fresh snapshot if any guarded pointer/state changes.
@@ -1308,7 +1398,7 @@ end
 
 emit('START revision=' .. state.revision .. ' debug=' .. tostring(DEBUG) ..
     ' tactical_reload=' .. tostring(ENABLE_TACTICAL_RELOAD) ..
-    ' reload_delay=0 heat_overheat_reload=true rounds_and_magazine=true no_native_calls=true no_memory_writes=true input_injection=true')
+    ' reload_delay=0 heat_overheat_reload=true rounds_and_magazine=true ammo_read_only=true native_fire_consume=true input_injection=true')
 sync_mod_options()
 snapshot('initial')
 

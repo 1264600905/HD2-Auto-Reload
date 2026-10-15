@@ -13,13 +13,14 @@ local function scenario(tactical_enabled, settings)
         rounds_magazine_count=0, rounds_chambered=false, weapon_context='on_foot'}
     local state = {elapsed=0, ticks=0, latest_row=row, latest_at=0, keys={}}
     local sent, logs, fresh, focused, own_down = 0, {}, row, true, false
-    local raw_keys = {}
+    local raw_keys, gamepad_fire = {}, false
     local send_ok, interrupted, on_refresh = true, false, nil
     local interrupt_flags = {}
     local api = {key_state=function(code) return raw_keys[code] or 0 end, game_focused=function() return focused end,
+        fire_held=function() return gamepad_fire or require('bit').band(raw_keys[0x01] or 0, 0x8000) ~= 0 end,
         own_reload_active=function() return own_down end,
         send_reload=function(interrupt_fire, defer_while_firing)
-            if defer_while_firing and require('bit').band(raw_keys[0x01] or 0, 0x8000) ~= 0 then
+            if defer_while_firing and (gamepad_fire or require('bit').band(raw_keys[0x01] or 0, 0x8000) ~= 0) then
                 return false, 'per_round_fire_held'
             end
             interrupt_flags[#interrupt_flags+1] = interrupt_fire == true
@@ -48,6 +49,7 @@ local function scenario(tactical_enabled, settings)
         on_refresh=function(callback) on_refresh=callback end,
         logging=function(value) environment.DEBUG=value end,
         hold_fire=function(value) raw_keys[0x01]=value and -32768 or 0; state.keys.LMB=value end,
+        hold_gamepad_fire=function(value) gamepad_fire=value end,
         own_key=function(value) own_down=value end,
         allow_send=function(value) send_ok=value end,
         interrupted_request=function() interrupted=true end,
@@ -59,6 +61,47 @@ end
 local function test(name, fn)
     fn(); tests=tests+1; print('PASS ' .. name)
 end
+
+test('AR-11 requests tactical reload at one magazine round, but not two', function()
+    local s=scenario(true); s.row.current_weapon_resource='a8a91eb54892b6b2'
+    s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
+    s.row.magazine_chamber_token=288; s.row.magazine_count=2
+    s.step(0); assert(s.sent()==0)
+    s.row.magazine_count=1; s.hold_gamepad_fire(true); s.step(.1)
+    assert(s.sent()==1 and s.interrupt_flags[1])
+    s.settings.tactical_reload=false; s.step(.2); assert(s.sent()==1)
+    s.row.magazine_count=0; s.step(.3); assert(s.sent()==1)
+    s.row.magazine_chamber_token=0; s.step(.4); assert(s.sent()==2)
+end)
+
+test('gamepad fire produces attack edges for empty stationary weapons', function()
+    local s=scenario(); s.row.current_weapon_resource='11c27d3babb38956'
+    s.row.ammo_path='weapon_magazine'; s.row.magazine_verified=true
+    s.row.magazine_count=0; s.row.magazine_chamber_token=0
+    s.probe(0); s.step(0); assert(s.sent()==0)
+    s.hold_gamepad_fire(true); s.probe(.1); s.step(.1); assert(s.sent()==1)
+    s.probe(.2); s.step(.2); assert(s.sent()==1)
+    s.hold_gamepad_fire(false); s.probe(.3)
+    s.hold_gamepad_fire(true); s.probe(.4); s.step(.4); assert(s.sent()==2)
+    assert(not s.interrupt_flags[1] and not s.interrupt_flags[2])
+end)
+
+test('per-round weapons wait for gamepad release and recheck a resumed trigger before input', function()
+    for _,tactical in ipairs({false,true}) do
+        for _,mode in ipairs({1,2,3}) do
+            local s=scenario(tactical,{tactical_reload=tactical,per_round_threshold=mode})
+            s.row.current_weapon_resource='41eac4a03987faa0'
+            s.row.rounds_magazine_capacity=8
+            s.hold_gamepad_fire(true); s.continuous_step(0); assert(s.sent()==0)
+            s.hold_gamepad_fire(false)
+            s.on_refresh(function() s.hold_gamepad_fire(true) end)
+            s.continuous_step(.1); assert(s.sent()==0)
+            s.on_refresh(nil); s.hold_gamepad_fire(false)
+            s.continuous_step(.2); assert(s.sent()>0)
+            for _,interrupt in ipairs(s.interrupt_flags) do assert(not interrupt) end
+        end
+    end
+end)
 test('empty reload sends immediately and only once', function()
     local s=scenario(); s.step(0); assert(s.sent()==1); s.step(.99); assert(s.sent()==1)
     s.step(1); s.step(7); assert(s.sent()==1)
@@ -242,7 +285,8 @@ test('new rounds thresholds use magazine count and AC-8 stays single request', f
     s.row.rounds_magazine_count=9; assert(not s.empty(s.row))
     s.row.current_weapon_resource='a8cffb316f0b5c5f' -- AC-8
     s.row.rounds_magazine_count=2; assert(not s.empty(s.row))
-    s.row.rounds_magazine_count=1; assert(s.empty(s.row))
+    s.row.rounds_magazine_count=1; assert(not s.empty(s.row))
+    s.row.rounds_magazine_count=0; assert(s.empty(s.row))
     s.continuous_step(0); assert(s.sent()==1)
     s.continuous_step(.99); assert(s.sent()==1)
     s.continuous_step(1); assert(s.sent()==1)
@@ -775,7 +819,7 @@ test('AC8 one and five round tactical modes remain single-request reloads', func
     for _,mode in ipairs({1,2}) do
         local s=configured_scenario(true);s.settings.ac8_threshold=mode
         s.row.current_weapon_resource='a8cffb316f0b5c5f'
-        local threshold=mode==1 and 1 or 5
+        local threshold=mode==1 and 0 or 5
         s.row.rounds_magazine_count=threshold+1;s.continuous_step(0);assert(s.sent()==0)
         s.row.rounds_magazine_count=threshold;s.continuous_step(.01);assert(s.sent()==1)
         s.continuous_step(.1);s.continuous_step(2);assert(s.sent()==1)
