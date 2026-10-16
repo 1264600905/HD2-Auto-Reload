@@ -53,7 +53,7 @@ class PackageTests(unittest.TestCase):
             result = subprocess.run([sys.executable, '-B', checkout / 'scripts/build.py'],
                                     cwd=checkout, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            path = checkout / 'build/Auto-Reload-v1.0.2.zip'
+            path = checkout / 'build/Auto-Reload-v1.0.7.zip'
             with zipfile.ZipFile(path) as z:
                 self.assertIsNone(z.testzip())
                 self.assertNotIn('ModOptionsMenu-LICENSE.txt', z.namelist())
@@ -70,6 +70,11 @@ class PackageTests(unittest.TestCase):
                 self.assertEqual((length, mode), (len(body), 2))
                 self.assertEqual(body, (checkout / 'build/auto_reload_entry.lua').read_bytes())
                 self.assertNotIn(b'-- HD2-Addon: mods/cowboybingus/mod_options_menu', body)
+                self.assertIn(b"revision = 'auto-reload-1.0.7'", body)
+                self.assertIn(b'local function process_reload_delay()', body)
+                self.assertIn(b'local make_random_reload_delay = (function()', body)
+                self.assertNotIn(b'-- RANDOM_RELOAD_DELAY_INSERT', body)
+                self.assertIn(b'fire_interrupt_seconds=0.5', body)
 
 
 if __name__ == '__main__':

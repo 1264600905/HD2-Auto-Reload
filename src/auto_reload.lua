@@ -16,7 +16,8 @@ local ERUPTOR_BOLT_ABILITY = 2660
 local ERUPTOR_BOLT_RETRY_SECONDS = 1
 local ERUPTOR_BOLT_MAX_ATTEMPTS = 3
 -- RELOAD_CONFIG_INSERT
-local state = {revision = 'auto-reload-1.0.2',
+-- RANDOM_RELOAD_DELAY_INSERT
+local state = {revision = 'auto-reload-1.0.7',
     ticks = 0, elapsed = 0, snapshots = 0,
     latest_row = nil,
     lmb_edge_time = nil, empty_since = nil, attempted = false, identity = nil,
@@ -149,7 +150,7 @@ local function read_api()
         return tonumber(owner[0]) == tonumber(process_id)
     end
     function api.key_state(code) return tonumber(get_async_key_state(code)) end
-    local fire_game, consume_fire
+    local fire_game, consume_fire, block_fire, release_fire
     function api.bind_fire_input(base)
         -- Build 25480438: Avatar FIRE is {group=2, action=9}. This is the
         -- merged action used by the game, including Steam Input controllers.
@@ -164,11 +165,17 @@ local function read_api()
             {0x12fde90, '40534883ec204c8bd14c8bca488bcae8dc7c28ff33db448bd8418bc1448bc3486bd0614c03da488b15638e020249c1e30543c6841328030000004b899c132c03000043899c1334030000'},
             {0x12fdf0e, '488b0d03f017020f28da41b802000000498bd14883c4205be925f3ffff'},
             {0x12fd250, '48895c240848896c2410488974241848897c24204154415641574883ec20488bf1458be0488bca488bdae8018928ff'},
+            {0x12fd3b0, '48896c2418564883ec204c8bd94c8bca488bcae8b88728ff418bb3509b0a0041c1e110440fb7d033c0450bd1'},
+            {0x12fd436, '418b4004488d0c4041c784cb387d0a0000000000488b5c2430488b7c2438488b6c24404883c4205ec3'},
+            {0x12fa358, '83fa0241b60144887424300f94442431'},
+            {0x12fb9e7, '440fb6742430807c2431000f84b50100004584f60f8413eaffff488bd3488bcee8a4190000'},
         }) do
             assert(hex(assert(api.read(base + sig[1], #sig[2] / 2))) == sig[2],
                 string.format('fire_input_layout_mismatch_at_%x', sig[1]))
         end
         consume_fire = ffi.cast('void (*)(void *, uint64_t, float)', base + 0x12fde90)
+        block_fire = ffi.cast('void (*)(void *, uint64_t, uint32_t, float)', base + 0x12fd250)
+        release_fire = ffi.cast('void (*)(void *, uint64_t)', base + 0x12fd3b0)
         fire_game = base
         return true
     end
@@ -183,7 +190,39 @@ local function read_api()
     function api.fire_held()
         return bit.band(api.key_state(0x01), 0x8000) ~= 0 or native_fire_state()
     end
+    function api.native_fire_held() return (native_fire_state()) end
+    function api.fire_block_status()
+        if not fire_game then return end
+        local input = api.pointer(api.read(fire_game + 0x347cf18, 8))
+        if not input then return end
+        local header = api.read(input + 0xa9b40, 20)
+        if not header then return end
+        local capacity = u32(header, 8)
+        if capacity == 0 or capacity > 65536 or bit.band(capacity, capacity - 1) ~= 0 then return end
+        local entries = api.pointer(header)
+        if not entries then return end
+        local key, empty, multiplier = 0x20009, u32(header, 12), u32(header, 16)
+        for probe = 0, math.min(capacity, 128) - 1 do
+            local entry = api.read(entries + ((product_low(key, multiplier) + probe) % capacity) * 8, 8)
+            if not entry then return end
+            if u32(entry, 0) == empty then return 0, 0 end
+            if u32(entry, 0) == key then
+                local index, count = u32(entry, 4), api.read(input + 0xa7d34, 4)
+                if not count or index >= u32(count, 0) or u32(count, 0) > 1024 then return end
+                local block = api.read(input + 0xa7d38 + index * 24, 24)
+                local clock = api.read(input + 0xa7d28, 8)
+                local scale_bytes = api.read(fire_game + 0x23c7ec0, 4)
+                if not block or not clock or not scale_bytes or u32(block, 4) ~= 2 or u32(block, 8) ~= 9 then return end
+                local scale = ffi.new('float[1]'); ffi.copy(scale, scale_bytes, 4)
+                if scale[0] <= 0 then return end
+                local expires = u32(block, 16) + u32(block, 20) * 4294967296
+                local now = u32(clock, 0) + u32(clock, 4) * 4294967296
+                return u32(block, 0), math.max(0, (expires - now) / tonumber(scale[0]) * 1000)
+            end
+        end
+    end
     local release_at, released_tick, bolt_release_at, bolt_released_tick
+    local fire_interrupt_until, fire_interrupt_input, fire_interrupt_native, fire_debug_at
     function api.own_reload_active() return release_at ~= nil end
     function api.own_bolt_active() return bolt_release_at ~= nil end
     local function key_event(up)
@@ -219,6 +258,103 @@ local function read_api()
             ' tick=' .. state.ticks .. ' sent=' .. tostring(sent))
         return sent == 1
     end
+    local function consume_native_fire(input, duration)
+        if api.pointer(api.read(fire_game + 0x347cf18, 8)) ~= input then
+            return false, 'fire_input_owner_changed'
+        end
+        consume_fire(ffi.cast('void *', input), ffi.new('uint64_t', 0x900000002), duration)
+        debug_emit('DEBUG_CONSUME_FIRE tick=' .. state.ticks .. ' action=2:9 seconds=' .. duration)
+        return true
+    end
+    local function block_native_fire(input)
+        if api.pointer(api.read(fire_game + 0x347cf18, 8)) ~= input then
+            return false, 'fire_input_owner_changed'
+        end
+        -- Mode 1 blocks until the deadline. consume_fire always installs mode 2,
+        -- which the game cancels as soon as the physical input is released.
+        block_fire(ffi.cast('void *', input), ffi.new('uint64_t', 0x900000002), 1, 0.5)
+        debug_emit('DEBUG_BLOCK_FIRE tick=' .. state.ticks .. ' action=2:9 mode=1 seconds=0.5')
+        return true
+    end
+    local function stop_fire_interrupt(reason)
+        if fire_interrupt_native and
+            api.pointer(api.read(fire_game + 0x347cf18, 8)) == fire_interrupt_input then
+            release_fire(ffi.cast('void *', fire_interrupt_input), ffi.new('uint64_t', 0x900000002))
+        end
+        if fire_interrupt_until then
+            debug_emit('DEBUG_FIRE_INTERRUPT_END tick=' .. state.ticks .. ' reason=' .. reason)
+        end
+        fire_interrupt_until, fire_interrupt_input, fire_interrupt_native, fire_debug_at = nil, nil, nil, nil
+    end
+    local function interrupt_fire_frame(expected_input, verify_owner)
+        local down, input = native_fire_state()
+        if verify_owner and (input ~= expected_input or (input and
+            api.pointer(api.read(fire_game + 0x347cf18, 8)) ~= input)) then
+            return false, 'fire_input_owner_changed'
+        end
+        local interrupted = false
+        if down and not verify_owner then
+            -- Clear the current shot before R. Never replace an active mode-1
+            -- window with consume_fire's release-sensitive mode during maintenance.
+            local ok, detail = consume_native_fire(input, 0)
+            if not ok then return false, detail end
+            interrupted = true
+        end
+        if bit.band(api.key_state(0x01), 0x8000) ~= 0 then
+            if not mouse_event(true) then return false, 'attack_release_rejected' end
+            interrupted = true
+        end
+        return true, nil, interrupted, input
+    end
+    function api.fire_interrupt_active()
+        return fire_interrupt_until ~= nil and api.now() < fire_interrupt_until
+    end
+    function api.begin_fire_interrupt()
+        if not api.game_focused() then return false, 'game_not_focused' end
+        if release_at or bolt_release_at then return false, 'input_release_pending' end
+        if bit.band(api.key_state(0x52), 0x8000) ~= 0 then return false, 'player_reload_held' end
+        if api.fire_interrupt_active() then return true end
+        stop_fire_interrupt('expired')
+        local ok, detail, interrupted, input = interrupt_fire_frame()
+        if not ok then return false, detail end
+        if interrupted then state.attack_interrupted = true end
+        fire_interrupt_until, fire_interrupt_input = api.now() + 0.5, input
+        if input then
+            local armed, why = block_native_fire(input)
+            fire_interrupt_native = armed
+            if not armed then stop_fire_interrupt(why); return false, why end
+        end
+        debug_emit('DEBUG_FIRE_INTERRUPT_BEGIN tick=' .. state.ticks ..
+            ' elapsed=' .. string.format('%.3f', state.elapsed) ..
+            ' duration_ms=500 native=' .. tostring(fire_interrupt_native == true) .. ' mode=fixed_time phase=threshold')
+        return true
+    end
+    function api.update_fire_interrupt(force)
+        if force then
+            stop_fire_interrupt('context_cancelled')
+        end
+        if not fire_interrupt_until then return true end
+        if not api.game_focused() then
+            stop_fire_interrupt('focus_lost')
+            return true
+        end
+        if api.now() >= fire_interrupt_until then
+            stop_fire_interrupt('expired')
+            return true
+        end
+        local ok, detail = interrupt_fire_frame(fire_interrupt_input, true)
+        if detail == 'fire_input_owner_changed' then
+            stop_fire_interrupt(detail)
+        end
+        if DEBUG and fire_interrupt_until and (not fire_debug_at or api.now() - fire_debug_at >= 0.1) then
+            fire_debug_at = api.now()
+            local mode, remaining = api.fire_block_status()
+            debug_emit(string.format('DEBUG_FIRE_BLOCK_STATE tick=%d elapsed=%.3f windows_lmb=%s merged_fire=%s mode=%s remaining_ms=%s',
+                state.ticks, state.elapsed, tostring(bit.band(api.key_state(0x01), 0x8000) ~= 0),
+                tostring(api.native_fire_held()), tostring(mode), remaining and string.format('%.1f', remaining) or 'nil'))
+        end
+        return ok, detail
+    end
     function api.release_bolt(force)
         if bolt_release_at and (force or api.now() >= bolt_release_at) then
             if not mouse_event(true, true) then return false end
@@ -228,6 +364,7 @@ local function read_api()
     end
     function api.send_bolt()
         if not api.game_focused() then return false, 'game_not_focused' end
+        if api.fire_interrupt_active() then return false, 'fire_interrupt_active' end
         if release_at or bolt_release_at or released_tick == state.ticks or
             bolt_released_tick == state.ticks then return false, 'input_release_pending' end
         if api.fire_held() or
@@ -254,23 +391,12 @@ local function read_api()
             return false, 'stale_key_released_retry_next_frame'
         end
         if interrupt_fire then
-            local down, input = native_fire_state()
-            if down then
-                if api.pointer(api.read(fire_game + 0x347cf18, 8)) ~= input then
-                    return false, 'fire_input_owner_changed'
-                end
-                -- Clear FIRE in all frame copies and consume it until the
-                -- player releases it. Movement, aim and other actions stay live.
-                consume_fire(ffi.cast('void *', input), ffi.new('uint64_t', 0x900000002), -1)
-                debug_emit('DEBUG_CONSUME_FIRE tick=' .. state.ticks .. ' action=2:9 until_release=true')
-                state.attack_interrupted = true
-            end
-            if bit.band(api.key_state(0x01), 0x8000) ~= 0 then
-                if not mouse_event(true) then return false, 'attack_release_rejected' end
-                state.attack_interrupted = true
-            end
+            if not api.fire_interrupt_active() then return false, 'fire_window_expired' end
+            local ok, detail = interrupt_fire_frame(fire_interrupt_input, true)
+            if not ok then return false, detail end
         end
-        -- Send R in this same update, immediately after releasing FIRE.
+        -- The controller already stopped FIRE before the random R delay.
+        -- Sending or retrying R must never replace or extend that window.
         if not key_event(false) then return false, 'keydown_rejected' end
         release_at = api.now() + 0.08
         local interrupted = interrupt_fire and state.attack_interrupted == true
@@ -349,6 +475,63 @@ local function read_heat_component(e, row)
     row.heat_config_source = override and 'entity_override' or 'resource_template'
     row.ammo_status = row.heat_overheated and
         (row.heat_requires_replacement and 'heat_sink_burned_out' or 'heat_cooling_lock') or 'heat_ready'
+end
+
+local function read_reload_action(e, row)
+    -- Build 25480438: 0x776010 compares effective Reload config +4 against
+    -- the wielder's active Ability. Read both identities; never call the game.
+    local pe = u32(e.read(e.game + 0x3c, 4), 0)
+    if u32(e.read(e.game + pe + 8, 4), 0) ~= 0x6ab3b43f then return end
+    for _, sig in ipairs({
+        {0x776198, '8b7d0485ff0f84cefeffff8bd3e8b65c05003bc7'},
+        {0x4fd25b, '458b4b68418b5b700fafd8'},
+        {0x4fd2c2, '488d048048c1e004490383a0000000'},
+        {0x4fce2f, '4c8b900028f100'},
+        {0x4fce9e, '8b4808488d048948c1e0044805201f0000'},
+        {0x7cbeea, '498b42384869c9e0000000807c011000'},
+        {0x7cbf0d, '8b04014883c408c3'},
+    }) do
+        if hex(e.read(e.game + sig[1], #sig[2] / 2)) ~= sig[2] then return end
+    end
+    local manager = e.global(0x3326a70)
+    local index = e.lookup(manager + 0x20, e.weapon_id, 65536)
+    if not index then return end
+    assert(index < 4096, 'reload_component_index_invalid')
+    assert(e.read(e.pointer(e.pointer(manager + 0x38, true) + index * 8, true), 24, true) == e.weapon,
+        'reload_component_identity_mismatch')
+    local override = e.lookup(manager + 0x60, e.weapon_id, 65536)
+    local config
+    if override then
+        assert(override < 4096, 'reload_override_index_invalid')
+        config = e.pointer(manager + 0xa0, true) + override * 80
+    else
+        local entries = e.pointer(e.owner + 0xf12800, true)
+        local low, high = u32(e.weapon, 0), u32(e.weapon, 4)
+        local first = ((high % 498) * (4294967296 % 498) + low % 498) % 498
+        for probe = 0, 127 do
+            local entry = e.read(entries + ((first + probe) % 498) * 16, 16, true)
+            if entry:sub(1, 8) == e.weapon:sub(1, 8) then
+                local template_index = u32(entry, 8)
+                assert(template_index < 498, 'reload_template_index_invalid')
+                config = entries + 0x1f20 + template_index * 80
+                break
+            end
+            if u32(entry, 0) == 0 and u32(entry, 4) == 0 then break end
+        end
+    end
+    if not config then return end
+    local ability = u32(e.read(config + 4, 4, true), 0)
+    local actions = e.global(0x3326640)
+    local action_index = e.lookup(actions + 0x18, e.avatar_id, 65536)
+    if not action_index then return end
+    assert(action_index < 4096, 'reload_player_action_index_invalid')
+    assert(e.read(e.pointer(e.pointer(actions + 0x30, true) + action_index * 8, true), 24, true) == e.avatar,
+        'reload_player_identity_mismatch')
+    local action = e.read(e.pointer(actions + 0x38, true) + action_index * 0xe0, 32, true)
+    assert(action:byte(17) <= 1, 'reload_action_flag_invalid')
+    row.reload_ability, row.reload_player_ability = ability, u32(action, 0)
+    row.reload_action_active = ability ~= 0 and action:byte(17) == 1 and row.reload_player_ability == ability
+    row.reload_state_verified = true
 end
 
 local function read_eruptor_bolt_component(e, row)
@@ -662,6 +845,13 @@ local function context_reader(api, game, extend)
     else
         row.ammo_status = 'unknown_ammo_path'
     end
+    if (row.ammo_path == 'weapon_magazine' or row.ammo_path == 'weapon_heat') and
+        (row.weapon_context == 'on_foot' or row.weapon_context == 'vehicle_passenger') then
+        local ok = pcall(read_reload_action, {read=read, pointer=pointer, global=global,
+            lookup=lookup, game=game, owner=owner, weapon_id=weapon_id, weapon=weapon,
+            avatar_id=entity_id, avatar=entity}, row)
+        if not ok then row.reload_state_verified = false end
+    end
     if row.current_weapon_resource == 'b6aff2195568767f' and
         (row.weapon_context == 'on_foot' or row.weapon_context == 'vehicle_passenger') then
         local ok, reason = pcall(read_eruptor_bolt_component,
@@ -722,10 +912,12 @@ local function verify_layout(api, game)
     end
 end
 
-local api, game
+local api, game, next_reload_delay_ms
 local setup_ok, setup_error = pcall(function()
     api = read_api()
     game = assert(api.module('game.dll'), 'game_module_missing')
+    next_reload_delay_ms = make_random_reload_delay(133.5821611111111, 306.24582071126537,
+        os.time() + math.floor(api.now() * 1000) + game % 2147483646)
     local dos = assert(api.read(game, 64), 'module_header_unavailable')
     assert(dos:sub(1, 2) == 'MZ', 'module_header_invalid')
     local pe_offset = u32(dos, 0x3c)
@@ -778,6 +970,10 @@ local function log_row(row, error_message, phase)
         'magazine_count=' .. scalar(row.magazine_count),
         'magazine_chamber=' .. scalar(row.magazine_chamber_token),
         'magazine_blocked=' .. scalar(row.magazine_chamber_blocked),
+        'reload_verified=' .. scalar(row.reload_state_verified),
+        'reload_active=' .. scalar(row.reload_action_active),
+        'reload_ability=' .. scalar(row.reload_ability),
+        'player_ability=' .. scalar(row.reload_player_ability),
         'bolt_status=' .. scalar(row.eruptor_bolt_status),
         'bolt_flags=' .. scalar(row.eruptor_reload_flags),
         'bolt_action_active=' .. scalar(row.eruptor_action_active),
@@ -881,6 +1077,14 @@ local function input_probe()
         end
     end
     local down = api.fire_held and api.fire_held() or state.keys.LMB == true
+    if api.native_fire_held then
+        local native_down = api.native_fire_held()
+        if state.native_fire_down ~= native_down then
+            state.native_fire_down = native_down
+            emit(string.format('INPUT tick=%d elapsed=%.3f name=FIRE_NATIVE down=%s',
+                state.ticks, state.elapsed, tostring(native_down)))
+        end
+    end
     if state.fire_down ~= down then
         state.fire_down = down
         if down and not (api.own_bolt_active and api.own_bolt_active()) then
@@ -1069,12 +1273,23 @@ local function reset_fire_interrupt()
     state.interrupted_retry_at, state.interrupted_retry_count, state.interrupted_ammo = nil, nil, nil
 end
 
-local function reload_request(reason, expected_tactical_count)
+local function reload_identity(row)
+    return tostring(row.current_weapon_resource) .. ':' .. tostring(row.selected_entity_id) ..
+        ':' .. tostring(row.selected_slot) .. ':' .. tostring(row._weapon_bytes) .. ':' .. tostring(row.local_entity_id) ..
+        ':' .. tostring(row.weapon_context) .. ':' .. tostring(row._selection_bytes) .. ':' .. tostring(row.ammo_path)
+end
+
+local function interrupting_weapon(row)
+    return row and (row.weapon_context == 'on_foot' or row.weapon_context == 'vehicle_passenger') and
+        not attack_only_rule(row) and not per_round_weapon(row) and row.current_weapon_resource ~= AC8_RESOURCE
+end
+
+local function reload_request(reason, expected_tactical_count, delay_elapsed)
     if per_round_fire_held(state.latest_row) then return end
     debug_emit(string.format('DEBUG_RELOAD_ENTER tick=%d elapsed=%.3f reason=%s resource=%s',
         state.ticks, state.elapsed, reason,
         tostring(state.latest_row and state.latest_row.current_weapon_resource)))
-    if state.attempted and reason ~= 'empty_attack' and reason ~= 'empty_retry' and reason ~= 'empty_periodic' and reason ~= 'interrupted_retry' and reason ~= 'tactical_idle' and
+    if state.attempted and reason ~= 'continuous_load' and reason ~= 'empty_attack' and reason ~= 'empty_retry' and reason ~= 'empty_periodic' and reason ~= 'interrupted_retry' and reason ~= 'tactical_idle' and
         reason ~= 'tactical_last_round' and reason ~= 'tactical_zero' and reason ~= 'tactical_immediate' then
         debug_emit('DEBUG_RELOAD_SKIP reason=already_attempted')
         return
@@ -1090,7 +1305,17 @@ local function reload_request(reason, expected_tactical_count)
         debug_emit('DEBUG_RELOAD_SKIP reason=missing_or_unsafe_context')
         return
     end
-    -- Refresh selection and ammo immediately before sending input.
+    if api.own_reload_active and api.own_reload_active() then return end
+    local interrupt_fire = interrupting_weapon(state.latest_row)
+    local episode = state.reload_episode
+    if interrupt_fire and episode and episode.attempts > 0 then
+        local retry_at = state.latest_row.current_weapon_resource == SPEARGUN_RESOURCE and
+            state.speargun_retry_at or state.interrupted_retry_at
+        -- Periodic checks and new fire edges cannot bypass the bounded retries.
+        if not retry_at or state.elapsed < retry_at then return end
+    end
+    if not delay_elapsed and state.pending_reload then return end
+    -- Verify selection/ammo both before stopping FIRE and before sending R.
     debug_emit(string.format('DEBUG_RELOAD_REFRESH_BEGIN tick=%d elapsed=%.3f',
         state.ticks, state.elapsed))
     local ok_read, fresh = pcall(context_reader, api, game)
@@ -1098,36 +1323,66 @@ local function reload_request(reason, expected_tactical_count)
         state.ticks, state.elapsed, tostring(ok_read),
         scalar(type(fresh) == 'table' and fresh.context_status or fresh)))
     if not ok_read or not fresh_context_matches(state.latest_row, fresh) then
+        state.pending_reload = nil
         debug_emit('DEBUG_RELOAD_SKIP reason=fresh_context_rejected')
+        return
+    end
+    if interrupt_fire and fresh.reload_state_verified and fresh.reload_action_active then
+        state.pending_reload = nil
         return
     end
     if expected_tactical_count and
         (tactical_ammo_count(fresh, tactical_rule(fresh)) or math.huge) > expected_tactical_count then
+        state.pending_reload = nil
         debug_emit('DEBUG_RELOAD_SKIP reason=last_round_changed')
+        return
+    end
+    if not delay_elapsed then
+        if interrupt_fire and not episode then
+            local ok, detail = api.begin_fire_interrupt()
+            if not ok then
+                debug_emit('DEBUG_RELOAD_SKIP reason=' .. tostring(detail))
+                return
+            end
+            episode = {identity=reload_identity(fresh), started_at=state.elapsed, attempts=0}
+            state.reload_episode, state.fire_interrupt_identity = episode, episode.identity
+        end
+        if interrupt_fire and episode.attempts == 0 and not api.fire_interrupt_active() then return end
+        local delay_ms = next_reload_delay_ms()
+        state.pending_reload = {identity=reload_identity(fresh), reason=reason,
+            expected_count=expected_tactical_count, generation=state.last_lmb_press_at or 0,
+            started_at=state.elapsed, due_at=state.elapsed + delay_ms / 1000, delay_ms=delay_ms}
+        state.last_reload_delay_ms = delay_ms
+        emit(string.format('RELOAD_DELAY_QUEUED tick=%d elapsed=%.3f delay_ms=%d reason=%s mag=%s chamber=%s',
+            state.ticks, state.elapsed, delay_ms, reason,
+            tostring(fresh.magazine_count or fresh.rounds_magazine_count),
+            tostring(fresh.magazine_chamber_token or fresh.rounds_chamber_token)))
+        return
+    end
+    if interrupt_fire and (not episode or (episode.attempts == 0 and not api.fire_interrupt_active())) then
+        state.pending_reload = nil
+        debug_emit('DEBUG_RELOAD_SKIP reason=fire_window_expired_before_first_R')
         return
     end
     debug_emit(string.format('DEBUG_RELOAD_SEND_BEGIN tick=%d elapsed=%.3f',
         state.ticks, state.elapsed))
-    local per_round = per_round_weapon(fresh)
-    local interrupt_fire = (fresh.weapon_context == 'on_foot' or fresh.weapon_context == 'vehicle_passenger') and
-        not attack_only_rule(fresh) and not per_round
-    local ok, detail, interrupted = api.send_reload(interrupt_fire, per_round)
+    local per_round = reason == 'continuous_load' or per_round_weapon(fresh)
+    local ok, detail = api.send_reload(interrupt_fire and episode.attempts == 0, per_round)
+    if not ok and detail == 'per_round_fire_held' then state.pending_reload = nil end
     debug_emit(string.format('DEBUG_RELOAD_SEND_END tick=%d elapsed=%.3f ok=%s detail=%s',
         state.ticks, state.elapsed, tostring(ok), tostring(detail)))
     emit(string.format(
         'RELOAD_REQUEST tick=%d elapsed=%.3f reason=%s sent=%s detail=%s resource=%s mag=%s chamber=%s',
         state.ticks, state.elapsed, reason, tostring(ok), tostring(detail),
-        tostring(state.latest_row.current_weapon_resource),
-        tostring(state.latest_row.magazine_count or state.latest_row.rounds_magazine_count),
-        tostring(state.latest_row.magazine_chamber_token or state.latest_row.rounds_chamber_token)))
+        tostring(fresh.current_weapon_resource),
+        tostring(fresh.magazine_count or fresh.rounds_magazine_count),
+        tostring(fresh.magazine_chamber_token or fresh.rounds_chamber_token)))
     if ok then
+        if interrupt_fire then episode.attempts = episode.attempts + 1 end
         state.last_request = state.elapsed
         state.attempted = true; state.request_at = state.elapsed
-        local rule = tactical_rule(fresh)
-        if interrupt_fire and fresh.current_weapon_resource ~= SPEARGUN_RESOURCE and
-            not (rule and rule.continuous) and (interrupted or reason == 'interrupted_retry') then
-            state.interrupted_retry_count = reason == 'interrupted_retry' and
-                (state.interrupted_retry_count or 0) + 1 or 0
+        if interrupt_fire and fresh.current_weapon_resource ~= SPEARGUN_RESOURCE then
+            state.interrupted_retry_count = episode.attempts - 1
             local delay = INTERRUPTED_RETRY_DELAYS[state.interrupted_retry_count + 1]
             state.interrupted_retry_at = delay and state.elapsed + delay or nil
             state.interrupted_ammo = observed_round_count(fresh)
@@ -1157,6 +1412,8 @@ local function auto_reload_step(periodic_check)
         state.critical_zero_requested = false
         state.tactical_sent_generation = nil
         state.per_round_debug_key = nil
+        state.pending_reload = nil
+        state.reload_episode = nil
         reset_speargun_retries()
         reset_fire_interrupt()
         return
@@ -1164,7 +1421,9 @@ local function auto_reload_step(periodic_check)
     local identity = tostring(row.current_weapon_resource) .. ':' .. tostring(row.selected_entity_id) ..
         ':' .. tostring(row.selected_slot) .. ':' .. tostring(row._weapon_bytes) .. ':' .. tostring(row.local_entity_id) ..
         ':' .. tostring(row.weapon_context) .. ':' .. tostring(row._selection_bytes)
-    if identity ~= state.identity then
+    if identity ~= state.identity or (state.reload_episode and state.reload_episode.identity ~= reload_identity(row)) then
+        state.pending_reload = nil
+        state.reload_episode = nil
         state.identity, state.empty_since, state.attempted = identity, nil, false
         state.request_at, state.last_request = nil, nil
         state.immediate_count = nil
@@ -1184,6 +1443,7 @@ local function auto_reload_step(periodic_check)
     if not eligible or (state.interrupted_ammo and ammo and ammo > state.interrupted_ammo) then
         reset_fire_interrupt()
     end
+    if not eligible then state.reload_episode = nil end
     if not eligible then state.immediate_count = nil end
     if count ~= 1 then state.critical_one_requested = false end
     if not rule or rule.limit ~= 0 or count ~= 0 then
@@ -1197,6 +1457,16 @@ local function auto_reload_step(periodic_check)
                 ' mag=' .. tostring(row.magazine_count or row.rounds_magazine_count) ..
                 ' chamber=' .. tostring(row.magazine_chamber_token or row.rounds_chamber_token))
         end
+        if interrupting_weapon(row) and row.reload_state_verified and row.reload_action_active then
+            state.pending_reload = nil
+            if state.reload_episode and not state.reload_episode.loading then
+                state.reload_episode.loading = true
+                emit('RELOAD_ACTION_CONFIRMED tick=' .. state.ticks ..
+                    ' elapsed=' .. string.format('%.3f', state.elapsed) .. ' ability=' .. tostring(row.reload_ability))
+            end
+            return
+        end
+        if state.reload_episode then state.reload_episode.loading = false end
         if state.request_at and state.elapsed - state.request_at >= 8 then
             emit('RELOAD_UNCONFIRMED reason=still_empty_after_8_seconds retry=press_attack')
             state.request_at = nil
@@ -1218,7 +1488,7 @@ local function auto_reload_step(periodic_check)
                 state.last_lmb_press_at > state.last_request
             if (state.immediate_count == nil or count < state.immediate_count or fresh_attack or periodic_check) and
                 not (api.own_reload_active and api.own_reload_active()) then
-                if reload_request('tactical_immediate', count) then state.immediate_count = count end
+                reload_request('tactical_immediate', count)
             end
             return
         end
@@ -1229,9 +1499,7 @@ local function auto_reload_step(periodic_check)
                 state.last_lmb_press_at > state.last_request
             if (not state.critical_zero_requested or fresh_attack or periodic_check) and
                 not (api.own_reload_active and api.own_reload_active()) then
-                if reload_request('tactical_zero', 0) then
-                    state.critical_zero_requested = true
-                end
+                reload_request('tactical_zero', 0)
             end
             return
         end
@@ -1241,9 +1509,7 @@ local function auto_reload_step(periodic_check)
             -- press can retry after our previous key has been released.
             if (not state.critical_one_requested or periodic_check) and
                 not (api.own_reload_active and api.own_reload_active()) then
-                if reload_request('tactical_last_round', 1) then
-                    state.critical_one_requested = true
-                end
+                reload_request('tactical_last_round', 1)
             end
             return
         end
@@ -1253,19 +1519,18 @@ local function auto_reload_step(periodic_check)
             local generation = state.last_lmb_press_at or 0
             if not rule.continuous and
                 (state.tactical_sent_generation ~= generation or periodic_check) then
-                if reload_request('tactical_idle') then
-                    state.tactical_sent_generation = generation
-                end
+                reload_request('tactical_idle')
             end
             return
         end
         if state.lmb_edge_time and state.elapsed - state.lmb_edge_time <= 0.25 and
             state.lmb_edge_time >= state.empty_since then
-            if reload_request('empty_attack') then state.lmb_edge_time = nil end
+            reload_request('empty_attack')
         elseif not attack_only and (not state.attempted or periodic_check) then
             reload_request(state.attempted and 'empty_periodic' or 'empty_immediate')
         end
     else
+        state.pending_reload = nil
         reset_speargun_retries()
         if state.request_at and row.ammo_path == 'weapon_heat' and row.heat_verified and not row.heat_overheated then
             emit('HEAT_LOCK_CLEARED_AFTER_REQUEST reload_animation_not_verified=true')
@@ -1319,27 +1584,48 @@ local function continuous_reload_step()
         return
     end
     state.continuous_probe_at = state.elapsed
-    debug_emit(string.format('DEBUG_CONTINUOUS_REFRESH_BEGIN tick=%d elapsed=%.3f',
-        state.ticks, state.elapsed))
-    local ok_read, fresh = pcall(context_reader, api, game)
-    if not ok_read or not fresh_context_matches(row, fresh) then
-        debug_emit('DEBUG_CONTINUOUS_SKIP reason=fresh_context_rejected')
+    reload_request('continuous_load')
+end
+
+local function process_reload_delay()
+    local pending, row = state.pending_reload, state.latest_row
+    if not pending then return end
+    if not row or row.context_status ~= 'context_observed' or row.weapon_owned ~= true or
+        not state.latest_at or state.elapsed - state.latest_at > 0.25 or
+        reload_identity(row) ~= pending.identity or not rounds_empty(row) or
+        unsafe_resources[row.current_weapon_resource] or not api.game_focused() or per_round_fire_held(row) then
+        state.pending_reload = nil
         return
     end
-    debug_emit(string.format('DEBUG_CONTINUOUS_SEND_BEGIN tick=%d elapsed=%.3f',
-        state.ticks, state.elapsed))
-    local ok, detail = api.send_reload(false, true)
-    debug_emit(string.format('DEBUG_CONTINUOUS_SEND_END tick=%d elapsed=%.3f ok=%s detail=%s',
-        state.ticks, state.elapsed, tostring(ok), tostring(detail)))
-    emit(string.format(
-        'RELOAD_REQUEST tick=%d elapsed=%.3f reason=continuous_load sent=%s detail=%s resource=%s mag=%s chamber=%s',
-        state.ticks, state.elapsed, tostring(ok), tostring(detail),
-        tostring(row.current_weapon_resource), tostring(row.rounds_magazine_count),
-        tostring(row.rounds_chamber_token)))
-    if ok then
-        state.last_request = state.elapsed
-        state.attempted = true; state.request_at = state.elapsed
+    if pending.expected_count and
+        (tactical_ammo_count(row, tactical_rule(row)) or math.huge) > pending.expected_count then
+        state.pending_reload = nil
+        return
     end
+    if state.elapsed < pending.due_at then return end
+    -- Re-read the live context and fire state in reload_request, after waiting.
+    if reload_request(pending.reason, pending.expected_count, true) then
+        state.last_reload_wait_ms = (state.elapsed - pending.started_at) * 1000
+        emit(string.format('RELOAD_DELAY_SENT delay_ms=%d waited_ms=%.3f reason=%s',
+            pending.delay_ms, state.last_reload_wait_ms, pending.reason))
+        state.pending_reload = nil
+        if pending.reason == 'tactical_immediate' then state.immediate_count = pending.expected_count
+        elseif pending.reason == 'tactical_zero' then state.critical_zero_requested = true
+        elseif pending.reason == 'tactical_last_round' then state.critical_one_requested = true
+        elseif pending.reason == 'tactical_idle' then state.tactical_sent_generation = pending.generation
+        elseif pending.reason == 'empty_attack' then state.lmb_edge_time = nil end
+    end
+end
+
+local function maintain_fire_interrupt()
+    if not api.update_fire_interrupt then return end
+    local row = state.latest_row
+    local valid = row and row.context_status == 'context_observed' and row.weapon_owned == true and
+        not per_round_weapon(row) and row.current_weapon_resource ~= AC8_RESOURCE and
+        state.latest_at and state.elapsed - state.latest_at <= 0.25 and
+        state.fire_interrupt_identity == reload_identity(row)
+    api.update_fire_interrupt(not valid)
+    if not valid or not api.fire_interrupt_active() then state.fire_interrupt_identity = nil end
 end
 
 local function eruptor_bolt_step(periodic_check)
@@ -1398,7 +1684,7 @@ end
 
 emit('START revision=' .. state.revision .. ' debug=' .. tostring(DEBUG) ..
     ' tactical_reload=' .. tostring(ENABLE_TACTICAL_RELOAD) ..
-    ' reload_delay=0 heat_overheat_reload=true rounds_and_magazine=true ammo_read_only=true native_fire_consume=true input_injection=true')
+    ' reload_delay_ms=80..150 delay_mean_ms=133.582161 delay_variance_ms2=306.245821 fire_interrupt_seconds=0.5 heat_overheat_reload=true rounds_and_magazine=true ammo_read_only=true native_fire_consume=true input_injection=true')
 sync_mod_options()
 snapshot('initial')
 
@@ -1421,6 +1707,7 @@ local function update(dt, ...)
             state.last_snapshot = state.elapsed
             snapshot('periodic')
         end
+        maintain_fire_interrupt()
         local trace_step = DEBUG and state.empty_since and state.lmb_edge_time and
             state.elapsed - state.lmb_edge_time <= 0.25
         if trace_step then
@@ -1442,6 +1729,7 @@ local function update(dt, ...)
         auto_reload_step(periodic_check and
             (not state.last_request or state.elapsed - state.last_request >= interval))
         continuous_reload_step()
+        process_reload_delay()
         eruptor_bolt_step(periodic_check)
         if trace_step then
             debug_emit(string.format('DEBUG_AUTO_STEP_END tick=%d elapsed=%.3f',
@@ -1453,7 +1741,8 @@ end
 _G.update = update
 local original_shutdown = rawget(_G, 'shutdown')
 _G.shutdown = function(...)
-    if api then api.release_bolt(true); api.release_reload(true) end
+    state.pending_reload = nil
+    if api then api.update_fire_interrupt(true); api.release_bolt(true); api.release_reload(true) end
     if original_shutdown then return original_shutdown(...) end
 end
 return state

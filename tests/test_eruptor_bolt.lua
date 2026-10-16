@@ -232,7 +232,8 @@ test('real update starts a guarded tap, forwards the old update and releases inp
         DEBUG=false,bit=bit,PERIODIC_CHECK_INTERVALS={.2,.5,1},
         sync_mod_options=function() end,input_probe=function() end,
         snapshot=function() state.latest_at=state.elapsed end,context_reader=function() return state.latest_row end,
-        auto_reload_step=function() end,continuous_reload_step=function() end,emit=function() end}, {__index=_G}))
+        auto_reload_step=function() end,continuous_reload_step=function() end,
+        process_reload_delay=function() end,maintain_fire_interrupt=function() end,emit=function() end}, {__index=_G}))
     local update,shutdown=factory();local a,b=update(.016,'arg')
     assert(forwarded and a=='previous' and b=='arg' and s.api.own_bolt_active())
     a,b=shutdown('arg');assert(closed and a=='closed' and b=='arg' and not s.api.own_bolt_active())

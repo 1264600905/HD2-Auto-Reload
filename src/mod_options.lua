@@ -1,4 +1,4 @@
--- Optional Mod Options Menu API 1 integration. Timing is always immediate.
+-- Optional Mod Options Menu API 1 integration. Reload requests wait 80-150 ms.
 local reload_settings = {
     tactical_reload = ENABLE_TACTICAL_RELOAD,
     shooting_postpones = true, -- Existing saved preference; renamed only.
@@ -55,6 +55,9 @@ local function reset_reload_settings_state()
     state.interrupted_retry_at, state.interrupted_retry_count, state.interrupted_ammo = nil, nil, nil
     state.bolt_identity, state.bolt_requested_at, state.bolt_attempts = nil, nil, nil
     state.periodic_check_at = nil
+    state.pending_reload = nil
+    state.reload_episode = nil
+    state.fire_interrupt_identity = nil
 end
 
 local function sync_mod_options()

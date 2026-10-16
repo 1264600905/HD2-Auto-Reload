@@ -8,10 +8,12 @@ local A='liu.auto_reload.ac8_threshold'
 local D='liu.auto_reload.reload_delay'
 local L='liu.auto_reload.logging'
 local B='liu.auto_reload.eruptor_auto_bolt'
+local C='liu.auto_reload.periodic_check'
 local function binding(tactical,menu)
     local globals={ModOptionsMenu=menu}
     local state={revision='auto-reload-0.6.9',identity='old',attempted=true,empty_since=1,attack_interrupted=true,
-        interrupted_retry_at=2,speargun_retry_at=3,continuous_identity='old',per_round_debug_key='old'}
+        interrupted_retry_at=2,speargun_retry_at=3,continuous_identity='old',per_round_debug_key='old',
+        pending_reload={due_at=1},fire_interrupt_identity='old'}
     local logs={}
     local factory=assert(loadstring(source..'\nreturn sync_mod_options,reload_settings'))
     setfenv(factory,setmetatable({_G=globals,state=state,ENABLE_TACTICAL_RELOAD=tactical==true,
@@ -28,7 +30,7 @@ local function mock(values,refused)
     menu.get=function(id) return menu.values[id] end
     return menu
 end
-test('without a menu timing stays immediate and tactical defaults stay intact',function()
+test('without a menu defaults stay intact and timing has no retired menu override',function()
     for _,enabled in ipairs({false,true}) do
         local b=binding(enabled);b.sync()
         assert(b.settings.tactical_reload==enabled and b.settings.reload_delay==nil)
@@ -36,9 +38,9 @@ test('without a menu timing stays immediate and tactical defaults stay intact',f
         assert(b.settings.eruptor_auto_bolt==true)
     end
 end)
-test('six bilingual options register once and remain visible with tactical reload off',function()
+test('seven bilingual options register once and remain visible with tactical reload off',function()
     local menu=mock();local b=binding(false,menu);b.sync();b.sync()
-    assert(menu.calls==6 and menu.specs[D]==nil and #b.logs==1)
+    assert(menu.calls==7 and menu.specs[D]==nil and #b.logs==1)
     assert(menu.specs[B].default==true and menu.specs[B].type=='toggle')
     assert(menu.specs[B].label=='爆裂铳自动拉栓/Eruptor Auto Bolt')
     assert(menu.specs[L].visible_if==nil and menu.specs[L].default==false)
@@ -57,7 +59,8 @@ test('saved tactical and shooting flags survive; old delay is ignored',function(
     assert(b.settings.per_round_threshold==3 and b.settings.ac8_threshold==2 and b.settings.reload_delay==nil)
     assert(b.state.identity==nil and b.state.attack_interrupted==nil and b.state.interrupted_retry_at==nil)
     assert(b.state.speargun_retry_at==nil and b.state.continuous_identity==nil)
-    assert(b.state.per_round_debug_key==nil)
+    assert(b.state.per_round_debug_key==nil and b.state.pending_reload==nil)
+    assert(b.state.fire_interrupt_identity==nil)
 end)
 test('only applied values reset controller state and choices are validated',function()
     local menu=mock();local b=binding(false,menu);b.sync();b.state.identity='current'
@@ -72,12 +75,12 @@ test('only applied values reset controller state and choices are validated',func
 end)
 test('late menus, refused registrations and older menus preserve safe defaults',function()
     local b=binding(false);b.sync();local menu=mock();b.globals.ModOptionsMenu=menu;b.sync()
-    assert(menu.calls==6)
+    assert(menu.calls==7)
     b=binding(true,mock({[P]=3},'all'));b.sync();b.sync()
-    assert(b.settings.tactical_reload and b.settings.per_round_threshold==1 and #b.logs==7)
+    assert(b.settings.tactical_reload and b.settings.per_round_threshold==1 and #b.logs==8)
     assert(b.settings.eruptor_auto_bolt)
     menu=mock({[T]=false,[P]=3,[A]=2});b=binding(true,menu);b.sync()
-    assert(menu.calls==6 and not b.settings.tactical_reload)
+    assert(menu.calls==7 and not b.settings.tactical_reload)
     assert(b.settings.per_round_threshold==3 and b.settings.ac8_threshold==2 and #b.logs==1)
 end)
 
@@ -94,8 +97,12 @@ end)
 test('logging changes do not rearm or cancel the active reload',function()
     local menu=mock();local b=binding(false,menu);b.sync();b.state.identity='current'
     b.state.interrupted_retry_at=2
+    b.state.pending_reload={due_at=3}
+    b.state.fire_interrupt_identity='current'
     menu.values[L]=true;b.sync()
     assert(b.settings.logging and b.state.identity=='current' and b.state.interrupted_retry_at==2)
+    assert(b.state.pending_reload and b.state.pending_reload.due_at==3)
+    assert(b.state.fire_interrupt_identity=='current')
     menu.values[L]=false;b.sync()
     assert(not b.settings.logging and b.state.identity=='current')
 end)
@@ -141,14 +148,14 @@ if arg and arg[1] then
         local f=assert(io.open(path,'wb'));f:write(D..'\t5\n');f:close();os.remove(path..'.bak')
         local menu=fresh_menu();local b=binding(false,menu);b.sync()
         local state=upvalue(menu.register_option,'state')
-        assert(state.option_count==6 and #state.mods==1 and state.options[D]==nil)
+        assert(state.option_count==7 and #state.mods==1 and state.options[D]==nil)
         local step=upvalue(update,'step')
         local mom=upvalue(upvalue(upvalue(step,'maintain_view'),'build_page'),'mom')
         local function assert_visible_options()
             local current_state=upvalue(menu.register_option,'state')
             local step=upvalue(update,'step')
             local mom=upvalue(upvalue(upvalue(step,'maintain_view'),'build_page'),'mom')
-            for _,id in ipairs({T,L,S,P,A,B}) do
+            for _,id in ipairs({T,L,S,P,A,B,C}) do
                 assert(current_state.options[id].visible_if==nil)
                 if type(mom.option_visible)=='function' then assert(mom.option_visible(current_state.options[id])) end
             end

@@ -82,6 +82,7 @@ local ok, why = pcall(function()
                 'seat_entity_id','seat_type','seat_role','seat_index',
                 'seat_transition','seat_passenger_flag',
                 'ammo_path','ammo_status','heat_verified','heat_overheated','heat_requires_replacement',
+                'reload_state_verified','reload_action_active','reload_ability','reload_player_ability',
                 'eruptor_bolt_verified','eruptor_bolt_status','eruptor_reload_flags','eruptor_needs_bolt',
                 'eruptor_bolt_ability','eruptor_active_ability','eruptor_action_active','eruptor_gameplay_input',
                 'eruptor_player_action_active','eruptor_player_active_ability',

@@ -17,6 +17,7 @@ MAPS = {
     'ROUNDS': ROOT / 'data/WeaponRoundsComponent.25327279.map.hex',
     'HEAT': ROOT / 'data/WeaponHeatComponent.25327279.map.hex',
 }
+DELAY_MARKER = '-- RANDOM_RELOAD_DELAY_INSERT'
 INSERT = (ROOT / 'src/component_maps.lua').read_text(encoding='utf-8')
 RELOAD_CONFIG = ROOT / 'src/reload_config.lua'
 RULE_LINE = re.compile(
@@ -98,13 +99,18 @@ def main():
     generated = source.replace(MARKER, insertion).replace(
         CONFIG_MARKER, reload_config).replace(
         OPTIONS_MARKER, (ROOT / 'src/mod_options.lua').read_text(encoding='utf-8'))
+    if generated.count(DELAY_MARKER) != 1:
+        raise SystemExit('random reload delay marker missing or duplicated')
+    generated = generated.replace(DELAY_MARKER,
+        'local make_random_reload_delay = (function()\n' +
+        (ROOT / 'src/random_reload_delay.lua').read_text(encoding='utf-8') + '\nend)()')
     BUILD.mkdir(parents=True, exist_ok=True)
     entry = BUILD / 'auto_reload_entry.lua'
     entry.write_text(generated, encoding='utf-8', newline='\n')
-    output = BUILD / 'Auto-Reload-v1.0.2.zip'
+    output = BUILD / 'Auto-Reload-v1.0.7.zip'
     build_addon('mods/liu/auto_reload_rounds', generated.encode('utf-8'),
                 '4df5aee3-3c5d-47fc-b0e9-0a40f7988738', output,
-                'Auto Reload v1.0.2',
+                'Auto Reload v1.0.7',
                 extra_files={'HD2-C4-Quick-Actions-MIT.txt': (ROOT / 'LICENSES/HD2-C4-Quick-Actions-MIT.txt').read_bytes()})
     print('Built', output)
 

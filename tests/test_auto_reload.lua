@@ -1,4 +1,6 @@
--- Exercise the actual controller functions with synthetic observations.
+-- Existing ammo-policy cases use a zero-delay fixture; test_reload_delay.lua
+-- exercises the actual queue with nonzero delays and production sampler.
+-- SendInput is always replaced with a local recording stub.
 local file = assert(io.open('src/auto_reload.lua', 'rb'))
 local source = file:read('*a'); file:close()
 local built = assert(io.open('build/auto_reload_entry.lua', 'rb'))
@@ -7,16 +9,24 @@ local input_code = assert(source:match('(local function input_probe%(%).-)\nloca
 local controller = assert(generated:match('(local function truly_empty.-)\nemit%(%\'START'))
 local policies = assert(generated:match('(local CONTINUOUS_RELOAD_INTERVAL_SECONDS =.-)\nlocal state ='))
 local tests = 0
-local function scenario(tactical_enabled, settings)
+local function scenario(tactical_enabled, settings, delay)
     local row = {context_status='context_observed', ammo_path='weapon_rounds',
         current_weapon_resource='safe', selected_entity_id=1, weapon_owned=true,
         rounds_magazine_count=0, rounds_chambered=false, weapon_context='on_foot'}
     local state = {elapsed=0, ticks=0, latest_row=row, latest_at=0, keys={}}
     local sent, logs, fresh, focused, own_down = 0, {}, row, true, false
+    local draws, requests, windows = 0, {}, {}
+    local protected_until
     local raw_keys, gamepad_fire = {}, false
     local send_ok, interrupted, on_refresh = true, false, nil
     local interrupt_flags = {}
     local api = {key_state=function(code) return raw_keys[code] or 0 end, game_focused=function() return focused end,
+        begin_fire_interrupt=function()
+            if not focused then return false, 'game_not_focused' end
+            windows[#windows+1]=state.elapsed;protected_until=state.elapsed+.5
+            return true
+        end,
+        fire_interrupt_active=function() return protected_until and state.elapsed<protected_until end,
         fire_held=function() return gamepad_fire or require('bit').band(raw_keys[0x01] or 0, 0x8000) ~= 0 end,
         own_reload_active=function() return own_down end,
         send_reload=function(interrupt_fire, defer_while_firing)
@@ -25,7 +35,8 @@ local function scenario(tactical_enabled, settings)
             end
             interrupt_flags[#interrupt_flags+1] = interrupt_fire == true
             if not send_ok then return false,'keyup_frame_pending' end
-            sent=sent+1; local was_interrupted=interrupted; interrupted=false
+            sent=sent+1; requests[#requests+1]={at=state.elapsed,interrupt=interrupt_fire,defer=defer_while_firing}
+            local was_interrupted=interrupted; interrupted=false
             return true,'test',was_interrupted
         end}
     local selected_policies = policies
@@ -34,16 +45,18 @@ local function scenario(tactical_enabled, settings)
     selected_policies = selected_policies:gsub('local tactical_rules = {',
         "local tactical_rules = {\n    ['timing_fixture'] = {name='test timing', path='weapon_magazine', limit=8},", 1)
     local factory = assert(loadstring(selected_policies .. '\n' .. controller ..
-        '\n' .. input_code .. '\nreturn auto_reload_step, rounds_empty, continuous_reload_step, input_probe'))
+        '\n' .. input_code .. '\nreturn auto_reload_step, rounds_empty, continuous_reload_step, input_probe, process_reload_delay'))
     settings = settings or {tactical_reload=tactical_enabled == true, configurable_timing=false}
     local environment = setmetatable({reload_settings=settings, state=state, api=api, DEBUG=false,
         bit=require('bit'), unsafe_resources={unsafe=true},
         context_reader=function() if on_refresh then on_refresh() end; return fresh end,
+        next_reload_delay_ms=function() draws=draws+1; return type(delay)=='function' and delay() or delay or 0 end,
         emit=function(s) logs[#logs+1]=s end, debug_emit=function() end,
         scalar=tostring}, {__index=_G})
     setfenv(factory, environment)
-    local step, empty, continuous, probe = factory()
-    return {row=row, state=state, settings=settings, logs=logs, empty=empty,
+    local step, empty, continuous, probe, process_delay = factory()
+    return {row=row, state=state, settings=settings, logs=logs, empty=empty, requests=requests,windows=windows,
+        draws=function() return draws end,
         probe=function(t, r) state.elapsed=t; raw_keys[0x52]=r and -32768 or 0; probe() end, sent=function() return sent end,
         fresh=function(value) fresh=value end, focus=function(value) focused=value end,
         on_refresh=function(callback) on_refresh=callback end,
@@ -55,9 +68,10 @@ local function scenario(tactical_enabled, settings)
         interrupted_request=function() interrupted=true end,
         interrupt_flags=interrupt_flags,
         click=function(t) state.last_lmb_press_at=t; state.lmb_edge_time=t end,
-        step=function(t) state.elapsed=t; state.latest_at=t; step() end,
-        continuous_step=function(t) state.elapsed=t; state.latest_at=t; step(); continuous() end}
+        step=function(t,periodic) state.elapsed=t; state.latest_at=t; step(periodic); process_delay() end,
+        continuous_step=function(t,periodic) state.elapsed=t; state.latest_at=t; step(periodic); continuous(); process_delay() end}
 end
+if AUTO_RELOAD_FIXTURE_ONLY then return scenario end
 local function test(name, fn)
     fn(); tests=tests+1; print('PASS ' .. name)
 end
@@ -743,8 +757,9 @@ test('every configured per-round weapon defers held fire but AC8 and magazine we
         assert(s.sent()==1 and s.interrupt_flags[1]==false,resource)
     end
     local ac8=configured_scenario(true); ac8.row.current_weapon_resource='a8cffb316f0b5c5f'
-    ac8.row.rounds_magazine_count=1; ac8.hold_fire(true); ac8.continuous_step(0)
-    assert(ac8.sent()==1 and ac8.interrupt_flags[1]==true)
+    ac8.row.rounds_magazine_count=0; ac8.row.rounds_chambered=true; ac8.row.rounds_chamber_token=259
+    ac8.hold_fire(true); ac8.continuous_step(0)
+    assert(ac8.sent()==1 and ac8.interrupt_flags[1]==false)
     local magazine=configured_magazine('84354339522c932d',1,0)
     magazine.hold_fire(true); magazine.step(0)
     assert(magazine.sent()==1 and magazine.interrupt_flags[1]==true)
