@@ -44,15 +44,21 @@ local options_menu, registered_options
 local function reset_reload_settings_state()
     -- Applying settings cancels the old weapon's pending timers and retries.
     state.identity, state.empty_since, state.attempted = nil, nil, false
+    state.empty_tick = nil
     state.request_at, state.last_request, state.immediate_count = nil, nil, nil
     state.lmb_edge_time, state.last_lmb_press_at = nil, nil
+    state.lmb_edge_tick, state.lmb_edge_identity = nil, nil
+    state.last_request_identity = nil
+    state.switch_cancelled_identity, state.switch_cancelled_at, state.switch_cancelled_ammo = nil, nil, nil
     state.critical_one_requested, state.critical_zero_requested = false, false
     state.tactical_sent_generation = nil
     state.continuous_identity, state.continuous_probe_at = nil, nil
     state.per_round_debug_key = nil
     state.speargun_retry_at, state.speargun_retry_count = nil, nil
+    state.speargun_retry_identity = nil
     state.attack_interrupted = nil
     state.interrupted_retry_at, state.interrupted_retry_count, state.interrupted_ammo = nil, nil, nil
+    state.interrupted_retry_identity = nil
     state.bolt_identity, state.bolt_requested_at, state.bolt_attempts = nil, nil, nil
     state.periodic_check_at = nil
     state.pending_reload = nil

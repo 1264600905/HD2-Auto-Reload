@@ -13,6 +13,13 @@
 - `data/*.25327279.map.hex` are resource-ID/index tables read locally from build
   25327279 after independently identifying the native getters. They contain no
   game executable code or asset payloads and serve only exact identity checks.
+- `data/ResourceCounterComponent.25480438.map.hex` and
+  `data/ItemComponent.25480438.map.hex` reuse the locally captured ResourceCounter
+  and Item fingerprints from the adjacent HD2-Triple-Reserve-Ammo project.
+  Reserve counter offsets and native signature pins follow that project's
+  independently verified build-25480438 readers. Only read-only reserve lookup
+  is adapted; no multiplier, configuration publication or ammo-writing logic is
+  included. These maps contain resource IDs and indices, not game code or assets.
 - The addon declaration, archive format and manifest are compatible with Bingus
   Shared Loader. The package encoder was separated from the existing shared-loader
   workspace. The loader itself and its game assets are not bundled.

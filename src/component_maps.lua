@@ -2,6 +2,8 @@
 local static_magazine_map = '__MAGAZINE_MAP__'
 local static_rounds_map = '__ROUNDS_MAP__'
 local static_heat_map = '__HEAT_MAP__'
+local static_backpack_map = '__BACKPACK_MAP__'
+local static_item_map = '__ITEM_MAP__'
 local function static_unhex(value)
     return (value:gsub('..', function(pair) return string.char(tonumber(pair, 16)) end))
 end
@@ -9,6 +11,8 @@ local specs = {
     magazine = {map=static_unhex(static_magazine_map), slot=0xf124a0, stride=160},
     rounds = {map=static_unhex(static_rounds_map), slot=0xf12820, stride=0x88},
     heat = {map=static_unhex(static_heat_map), slot=0xf12cc8, stride=0x250},
+    backpack = {map=static_unhex(static_backpack_map), slot=0xf12a00, stride=152},
+    item = {map=static_unhex(static_item_map), slot=0xf12bc0, stride=232},
 }
 component_static_record = function(e, row, name)
     local spec = assert(specs[name], 'unknown_component_map')
