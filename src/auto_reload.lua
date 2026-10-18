@@ -7,6 +7,7 @@ local existing = rawget(_G, 'LiuAutoReloadRounds')
 if existing then return existing end
 
 local DEBUG = false -- Controlled by the in-game logging option.
+local PERF = false -- Independent, low-frequency performance summaries.
 local CONTINUOUS_RELOAD_INTERVAL_SECONDS = 0
 local SPEARGUN_RESOURCE = '3828e2051aa9e897'
 local SPEARGUN_RETRY_DELAYS = {0.25, 0.5, 1.0}
@@ -17,7 +18,7 @@ local ERUPTOR_BOLT_RETRY_SECONDS = 1
 local ERUPTOR_BOLT_MAX_ATTEMPTS = 3
 -- RELOAD_CONFIG_INSERT
 -- RANDOM_RELOAD_DELAY_INSERT
-local state = {revision = 'auto-reload-1.0.9',
+local state = {revision = 'auto-reload-1.0.10',
     ticks = 0, elapsed = 0, snapshots = 0,
     latest_row = nil,
     lmb_edge_time = nil, empty_since = nil, attempted = false, identity = nil,
@@ -28,7 +29,7 @@ local unsafe_resources = {}
 rawset(_G, 'LiuAutoReloadRounds', state)
 
 local logger = rawget(_G, 'CowboyBingusModLoader')
-local file
+local file, log_dirty, last_log_flush
 local function ensure_log()
     if not file and logger and logger.open_log then
         local ok, result = pcall(logger.open_log, 'AutoReloadRounds.log')
@@ -36,23 +37,81 @@ local function ensure_log()
     end
 end
 
-local function emit(line)
-    if not DEBUG then return end
+local function write_log(line, console)
     ensure_log()
-    print('[AutoReload] ' .. line)
+    if console or not file then print('[AutoReload] ' .. line) end
     if file then
-        pcall(function() file:write(line .. '\n'); file:flush() end)
+        pcall(function() file:write(line .. '\n') end)
+        log_dirty = true
     end
 end
 
-local function debug_emit(line)
-    if not DEBUG then return end
-    ensure_log()
-    if file then
-        pcall(function() file:write(line .. '\n'); file:flush() end)
-    else
-        print('[AutoReload] ' .. line)
+local function flush_log(force)
+    if not file or not log_dirty then return end
+    if force or not last_log_flush or state.elapsed - last_log_flush >= 1 then
+        pcall(function() file:flush() end)
+        last_log_flush, log_dirty = state.elapsed, false
     end
+end
+
+local function emit(line)
+    if DEBUG then write_log(line, true) end
+end
+
+local function debug_emit(line)
+    if DEBUG then write_log(line, false) end
+end
+
+local perf_clock, perf_timer = os.clock, 'clock'
+local function perf_begin()
+    if not PERF then return end
+    local now = perf_clock()
+    state.performance = state.performance or {since=now, stages={}, counters={}}
+    return now
+end
+
+local function perf_end(name, started)
+    if not started or not PERF then return end
+    local stages = state.performance.stages
+    local stage = stages[name] or {calls=0, total=0, worst=0}
+    local duration = (perf_clock() - started) * 1000
+    stage.calls, stage.total = stage.calls + 1, stage.total + duration
+    stage.worst = math.max(stage.worst, duration)
+    stages[name] = stage
+end
+
+local function perf_count(name, amount)
+    if not PERF then return end
+    if not state.performance then perf_begin() end
+    local counters = state.performance.counters
+    counters[name] = (counters[name] or 0) + (amount or 1)
+end
+
+local function perf_report(force)
+    local stats = state.performance
+    if not stats then return end
+    local seconds = perf_clock() - stats.since
+    if seconds <= 0 or (not force and seconds < 5) then return end
+    local update = stats.stages.update or {calls=0, total=0, worst=0}
+    local counters = stats.counters
+    write_log(string.format(
+        'PERF_SUMMARY revision=%s timer=%s window_s=%.3f updates=%d self_ms_per_s=%.3f avg_update_ms=%.4f worst_update_ms=%.4f reads_per_s=%.1f bytes_per_s=%.1f map_checks=%d map_hits=%d layout_checks=%d context_failures=%d detailed_logging=%s context_status=%s resource=%s',
+        state.revision, perf_timer, seconds, update.calls, update.total / seconds,
+        update.total / math.max(1, update.calls), update.worst,
+        (counters.reads or 0) / seconds, (counters.bytes or 0) / seconds,
+        counters.map_checks or 0, counters.map_hits or 0, counters.layout_checks or 0,
+        counters.context_failures or 0, tostring(DEBUG),
+        tostring(state.latest_row and state.latest_row.context_status),
+        tostring(state.latest_row and state.latest_row.current_weapon_resource)), true)
+    local fields = {'PERF_STAGES', 'nested_static_in_context=true', 'nested_context_in_control=true'}
+    for _, name in ipairs({'options', 'input', 'context', 'static', 'control'}) do
+        local stage = stats.stages[name] or {calls=0, total=0, worst=0}
+        fields[#fields + 1] = string.format('%s_calls=%d %s_ms_per_s=%.3f %s_worst_ms=%.4f',
+            name, stage.calls, name, stage.total / seconds, name, stage.worst)
+    end
+    write_log(table.concat(fields, ' '), false)
+    flush_log(true)
+    state.performance = nil
 end
 
 -- MOD_OPTIONS_INSERT
@@ -81,14 +140,16 @@ local function capacity_from_config(config, selected)
     if value >= 1 and value <= 100000 and value % 1 == 0 then return value end
 end
 
+local hex_bytes = {}
+for i = 0, 255 do hex_bytes[i] = string.format('%02x', i) end
 local function hex(bytes)
-    return (bytes:gsub('.', function(c) return string.format('%02x', c:byte()) end))
+    return (bytes:gsub('.', function(c) return hex_bytes[c:byte()] end))
 end
 
 local function resource(bytes)
-    local out = {}
-    for i = 8, 1, -1 do out[#out + 1] = string.format('%02x', bytes:byte(i)) end
-    return table.concat(out)
+    local a, b, c, d, e, f, g, h = bytes:byte(1, 8)
+    return hex_bytes[h] .. hex_bytes[g] .. hex_bytes[f] .. hex_bytes[e] ..
+        hex_bytes[d] .. hex_bytes[c] .. hex_bytes[b] .. hex_bytes[a]
 end
 
 local function product_low(a, b)
@@ -114,11 +175,29 @@ local function read_api()
     local kernel = ffi.load('kernel32')
     local user32 = ffi.load('user32')
     pcall(ffi.cdef, 'uint32_t __stdcall SendInput(uint32_t, const void *, int);')
+    pcall(ffi.cdef, [[
+        int QueryPerformanceCounter(int64_t *value);
+        int QueryPerformanceFrequency(int64_t *value);
+    ]])
     local send_input = ffi.cast(
         'uint32_t (__stdcall *)(uint32_t, const void *, int)', user32.SendInput)
     local get_async_key_state = user32.GetAsyncKeyState
     local process = kernel.GetCurrentProcess()
     local process_id = kernel.GetCurrentProcessId()
+    -- Each read is copied to an immutable Lua string before the next call.
+    local output, count = ffi.new('uint8_t[4096]'), ffi.new('size_t[1]')
+    local pointer_value, window_owner = ffi.new('uintptr_t[1]'), ffi.new('uint32_t[1]')
+    local counter, frequency = ffi.new('int64_t[1]'), ffi.new('int64_t[1]')
+    pcall(function()
+        if kernel.QueryPerformanceFrequency(frequency) ~= 0 and tonumber(frequency[0]) > 0 then
+            local scale = tonumber(frequency[0])
+            perf_timer = 'qpc'
+            perf_clock = function()
+                kernel.QueryPerformanceCounter(counter)
+                return tonumber(counter[0]) / scale
+            end
+        end
+    end)
     local api = {}
     function api.now() return tonumber(kernel.GetTickCount64()) / 1000 end
     function api.module(name)
@@ -128,16 +207,16 @@ local function read_api()
     end
     function api.pointer(bytes)
         if not bytes or #bytes < 8 then return nil end
-        local value = ffi.new('uintptr_t[1]')
-        ffi.copy(value, bytes, 8)
-        local number = tonumber(value[0])
+        ffi.copy(pointer_value, bytes, 8)
+        local number = tonumber(pointer_value[0])
         if number and number >= 65536 and number < 0x800000000000 then return number end
     end
     function api.read(address, size)
         assert(type(address) == 'number' and address >= 65536 and
             address + size < 0x800000000000, 'bad_read_address')
         assert(size > 0 and size <= 4096, 'bad_read_size')
-        local output, count = ffi.new('uint8_t[?]', size), ffi.new('size_t[1]')
+        if PERF then perf_count('reads'); perf_count('bytes', size) end
+        count[0] = 0
         if kernel.ReadProcessMemory(process, ffi.cast('const void *', address),
             output, size, count) == 0 or tonumber(count[0]) ~= size then return nil end
         return ffi.string(output, size)
@@ -145,9 +224,8 @@ local function read_api()
     function api.game_focused()
         local window = user32.GetForegroundWindow()
         if window == nil then return false end
-        local owner = ffi.new('uint32_t[1]')
-        user32.GetWindowThreadProcessId(window, owner)
-        return tonumber(owner[0]) == tonumber(process_id)
+        if user32.GetWindowThreadProcessId(window, window_owner) == 0 then return false end
+        return tonumber(window_owner[0]) == tonumber(process_id)
     end
     function api.key_state(code) return tonumber(get_async_key_state(code)) end
     local fire_game, consume_fire, block_fire, release_fire
@@ -197,13 +275,21 @@ local function read_api()
         return bit.band(api.key_state(0x01), 0x8000) ~= 0 or native_fire_state()
     end
     function api.native_fire_held() return (native_fire_state()) end
+    function api.fire_states()
+        local mouse_down = bit.band(api.key_state(0x01), 0x8000) ~= 0
+        if mouse_down and not DEBUG then return true end
+        local native_down = native_fire_state()
+        return mouse_down or native_down, native_down
+    end
     function api.weapon_switch_pending()
         if not fire_game then return false end
         local input = api.pointer(api.read(fire_game + 0x347cf18, 8))
         if not input then return true end
-        for _, action in ipairs({19, 20, 22, 23, 24, 29, 30}) do
-            local value = api.read(input + 0x328 + (2 * 97 + action) * 32, 1)
-            if not value or value:byte(1) ~= 0 then return true end
+        -- Actions 19..30 share one contiguous native input array.
+        local values = api.read(input + 0x328 + (2 * 97 + 19) * 32, 353)
+        if not values then return true end
+        for _, offset in ipairs({0, 32, 96, 128, 160, 320, 352}) do
+            if values:byte(offset + 1) ~= 0 then return true end
         end
         return false
     end
@@ -476,11 +562,15 @@ local magazine_static_records, component_static_record
 
 local function read_magazine_component(e, row)
     -- Build 25327279 ammo query 0x744d02..0x744db7. No game calls.
-    assert(e.read(e.game + 0x744d02, 7) == '\x48\x8b\x2d\x3f\x19\xbe\x02',
-        'magazine_native_signature_mismatch')
-    assert(hex(e.read(e.game + 0x744d6c, 76)) ==
-        '488b4d38488bdf48c1e30448035d48488b0cf9e8bce9daff80b89c000000007420488b4550488d0c7f807c880800750a837b08000f85b600000032c0e9b1000000833b000f9fc0e9a6000000',
-        'magazine_native_layout_mismatch')
+    if not e.layouts or not e.layouts.magazine then
+        if PERF then perf_count('layout_checks') end
+        assert(e.read(e.game + 0x744d02, 7) == '\x48\x8b\x2d\x3f\x19\xbe\x02',
+            'magazine_native_signature_mismatch')
+        assert(hex(e.read(e.game + 0x744d6c, 76)) ==
+            '488b4d38488bdf48c1e30448035d48488b0cf9e8bce9daff80b89c000000007420488b4550488d0c7f807c880800750a837b08000f85b600000032c0e9b1000000833b000f9fc0e9a6000000',
+            'magazine_native_layout_mismatch')
+        if e.layouts then e.layouts.magazine = true end
+    end
     local records = assert(magazine_static_records, 'magazine_maps_not_built')(e, row)
     if not records then row.ammo_status = 'magazine_static_identity_unverified'; return end
     local manager = e.global(0x3326648)
@@ -512,10 +602,14 @@ end
 
 local function read_heat_component(e, row)
     -- Build 25327279: 0x764ee0 separates action inhibition from Heat +8.
-    assert(hex(e.read(e.game + 0x764efa, 7)) == '4c8b15471ebc02',
-        'heat_native_manager_mismatch')
-    assert(hex(e.read(e.game + 0x764f79, 18)) == '8bc8498b4258488d1449807c9008000f94c0',
-        'heat_native_layout_mismatch')
+    if not e.layouts or not e.layouts.heat then
+        if PERF then perf_count('layout_checks') end
+        assert(hex(e.read(e.game + 0x764efa, 7)) == '4c8b15471ebc02',
+            'heat_native_manager_mismatch')
+        assert(hex(e.read(e.game + 0x764f79, 18)) == '8bc8498b4258488d1449807c9008000f94c0',
+            'heat_native_layout_mismatch')
+        if e.layouts then e.layouts.heat = true end
+    end
     local config = assert(component_static_record, 'heat_maps_not_built')(e, row, 'heat')
     if not config then row.ammo_status = 'heat_static_identity_unverified'; return end
     row.reserve_native_max = u32(config, 0x5c)
@@ -567,13 +661,17 @@ local function read_backpack_reserves(e, row)
     local id = u32(slots, 12)
     if id == 0 or id == INVALID then return end
     row.reserve_verified, row.reserve_source = false, 'backpack'
-    for _, sig in ipairs({
-        {0x88085a, '4c8b15875daa02'},
-        {0x8808ea, '498b42508b04c8'},
-        {0x508e9f, '4c8b90c02bf100'},
-        {0x508f11, '4869c1e80000004805002b0000'},
-    }) do
-        if hex(e.read(e.game + sig[1], #sig[2] / 2)) ~= sig[2] then return end
+    if not e.layouts or not e.layouts.backpack then
+        if PERF then perf_count('layout_checks') end
+        for _, sig in ipairs({
+            {0x88085a, '4c8b15875daa02'},
+            {0x8808ea, '498b42508b04c8'},
+            {0x508e9f, '4c8b90c02bf100'},
+            {0x508f11, '4869c1e80000004805002b0000'},
+        }) do
+            if hex(e.read(e.game + sig[1], #sig[2] / 2)) ~= sig[2] then return end
+        end
+        if e.layouts then e.layouts.backpack = true end
     end
     local bi = e.lookup(e.owner + 0xf1aeb0, id, 1048576)
     if not bi then return end
@@ -606,18 +704,22 @@ end
 local function read_reload_action(e, row)
     -- Build 25480438: 0x776010 compares effective Reload config +4 against
     -- the wielder's active Ability. Read both identities; never call the game.
-    local pe = u32(e.read(e.game + 0x3c, 4), 0)
-    if u32(e.read(e.game + pe + 8, 4), 0) ~= 0x6ab3b43f then return end
-    for _, sig in ipairs({
-        {0x776198, '8b7d0485ff0f84cefeffff8bd3e8b65c05003bc7'},
-        {0x4fd25b, '458b4b68418b5b700fafd8'},
-        {0x4fd2c2, '488d048048c1e004490383a0000000'},
-        {0x4fce2f, '4c8b900028f100'},
-        {0x4fce9e, '8b4808488d048948c1e0044805201f0000'},
-        {0x7cbeea, '498b42384869c9e0000000807c011000'},
-        {0x7cbf0d, '8b04014883c408c3'},
-    }) do
-        if hex(e.read(e.game + sig[1], #sig[2] / 2)) ~= sig[2] then return end
+    if not e.layouts or not e.layouts.reload then
+        if PERF then perf_count('layout_checks') end
+        local pe = u32(e.read(e.game + 0x3c, 4), 0)
+        if u32(e.read(e.game + pe + 8, 4), 0) ~= 0x6ab3b43f then return end
+        for _, sig in ipairs({
+            {0x776198, '8b7d0485ff0f84cefeffff8bd3e8b65c05003bc7'},
+            {0x4fd25b, '458b4b68418b5b700fafd8'},
+            {0x4fd2c2, '488d048048c1e004490383a0000000'},
+            {0x4fce2f, '4c8b900028f100'},
+            {0x4fce9e, '8b4808488d048948c1e0044805201f0000'},
+            {0x7cbeea, '498b42384869c9e0000000807c011000'},
+            {0x7cbf0d, '8b04014883c408c3'},
+        }) do
+            if hex(e.read(e.game + sig[1], #sig[2] / 2)) ~= sig[2] then return end
+        end
+        if e.layouts then e.layouts.reload = true end
     end
     local manager = e.global(0x3326a70)
     local index = e.lookup(manager + 0x20, e.weapon_id, 65536)
@@ -662,20 +764,24 @@ end
 
 local function read_eruptor_bolt_component(e, row)
     -- Verified on build 25480438 only. Unsupported layouts disable this feature.
-    local pe = u32(e.read(e.game + 0x3c, 4), 0)
-    if u32(e.read(e.game + pe + 8, 4), 0) ~= 0x6ab3b43f then
-        row.eruptor_bolt_status = 'unsupported_build'; return
-    end
-    for _, signature in ipairs({
-        {0x777786, '8bc8498b4350448534880f95c0'}, -- Reload flags, stride 4
-        {0x77eaa4, '83b8b00400000074c2488b0dbc7fba0241b8000800008bd3e82f8cffff84c074aa'},
-        {0x786d4e, 'e86d7bffff84c0745d8bd3e81283ffff'}, -- fire -> bolt action
-        {0x50957f, '4c8b90d82bf100'}, -- effective WeaponData template map
-        {0x5095f1, '4869c1d00400004805a02d0000'}, -- stride 1232, map bytes 11680
-    }) do
-        if hex(e.read(e.game + signature[1], #signature[2] / 2)) ~= signature[2] then
-            row.eruptor_bolt_status = 'unsupported_layout'; return
+    if not e.layouts or not e.layouts.eruptor then
+        if PERF then perf_count('layout_checks') end
+        local pe = u32(e.read(e.game + 0x3c, 4), 0)
+        if u32(e.read(e.game + pe + 8, 4), 0) ~= 0x6ab3b43f then
+            row.eruptor_bolt_status = 'unsupported_build'; return
         end
+        for _, signature in ipairs({
+            {0x777786, '8bc8498b4350448534880f95c0'}, -- Reload flags, stride 4
+            {0x77eaa4, '83b8b00400000074c2488b0dbc7fba0241b8000800008bd3e82f8cffff84c074aa'},
+            {0x786d4e, 'e86d7bffff84c0745d8bd3e81283ffff'}, -- fire -> bolt action
+            {0x50957f, '4c8b90d82bf100'}, -- effective WeaponData template map
+            {0x5095f1, '4869c1d00400004805a02d0000'}, -- stride 1232, map bytes 11680
+        }) do
+            if hex(e.read(e.game + signature[1], #signature[2] / 2)) ~= signature[2] then
+                row.eruptor_bolt_status = 'unsupported_layout'; return
+            end
+        end
+        if e.layouts then e.layouts.eruptor = true end
     end
     local function component(rva, map_offset, registry_offset, entity_id, entity_bytes)
         local manager = e.global(rva)
@@ -739,13 +845,27 @@ local function read_eruptor_bolt_component(e, row)
 end
 
 local function context_reader(api, game, extend)
-    local guards, reads, bytes = {}, 0, 0
+    local addresses, values, guard_count, reads, bytes = {}, {}, 0, 0, 0
+    local now = api.now and api.now()
+    local cache
+    if now then
+        cache = api._auto_reload_cache
+        if not cache or cache.game ~= game or now < cache.layout_at then
+            cache = {game=game, layout_at=now, layouts={}, maps={}}
+            api._auto_reload_cache = cache
+        elseif now - cache.layout_at >= 1 then
+            cache.layout_at, cache.layouts = now, {}
+        end
+    end
     local function read(address, size, guard)
         reads, bytes = reads + 1, bytes + size
         assert(reads <= 768 and bytes <= 32768, 'snapshot_budget')
         local result = assert(api.read(address, size), 'read_unavailable')
         assert(#result == size, 'short_read')
-        if guard then guards[#guards + 1] = {address, result} end
+        if guard then
+            guard_count = guard_count + 1
+            addresses[guard_count], values[guard_count] = address, result
+        end
         return result
     end
     local function pointer(address, guard)
@@ -768,8 +888,8 @@ local function context_reader(api, game, extend)
         error('map_probe_limit')
     end
     local function checked()
-        for _, guard in ipairs(guards) do
-            if read(guard[1], #guard[2]) ~= guard[2] then return false end
+        for i = 1, guard_count do
+            if read(addresses[i], #values[i]) ~= values[i] then return false end
         end
         return true
     end
@@ -799,6 +919,9 @@ local function context_reader(api, game, extend)
     if avatar_unit == 0x7fff then return finish(row, 'waiting_for_avatar') end
 
     local owner = global(0x346bf98)
+    if cache and cache.owner ~= owner then
+        cache.owner, cache.maps, cache.layouts, cache.layout_at = owner, {}, {}, now
+    end
     local entity_index = lookup(owner + 0xf22ec8, avatar_unit, 1048576)
     if not entity_index then return finish(row, 'avatar_map_missing') end
     assert(entity_index < 1048576, 'avatar_entity_index_invalid')
@@ -919,6 +1042,10 @@ local function context_reader(api, game, extend)
         return finish(row, 'vehicle_ammo_path_mismatch')
     end
 
+    local e = {read=read, pointer=pointer, global=global, lookup=lookup,
+        game=game, owner=owner, weapon_id=weapon_id, weapon=weapon,
+        avatar_id=entity_id, avatar=entity, cache=cache, now=now,
+        layouts=cache and cache.layouts}
     if row.ammo_path == 'weapon_rounds' then
         local rounds_manager = global(0x3326cf0)
         local rounds_index = lookup(rounds_manager + 0x28, weapon_id, 65536)
@@ -937,7 +1064,6 @@ local function context_reader(api, game, extend)
         row.rounds_chamber_blocked = runtime:byte(0x11) ~= 0
         row.ammo_counter_semantics = 'selected_magazine_only_not_backpack_or_chamber'
         row.ammo_status = row.rounds_magazine_count > 0 and 'magazine_nonempty' or 'magazine_empty'
-        local e = {read=read, pointer=pointer, lookup=lookup, owner=owner, weapon_id=weapon_id}
         local config = component_static_record(e, row, 'rounds')
         if config then
             row.reserve_native_max = u32(config, 0x50)
@@ -956,7 +1082,7 @@ local function context_reader(api, game, extend)
         if config then
             row.rounds_chambered = config:byte(0x69) ~= 0
             row.rounds_magazine_capacity = capacity_from_config(config, selected)
-            row.rounds_config_hex = hex(config)
+            if DEBUG then row.rounds_config_hex = hex(config) end
             if row.rounds_chambered then
                 row.ammo_status = row.rounds_chamber_blocked and 'chamber_blocked' or
                     row.rounds_chamber_token == 0 and 'chamber_empty' or 'chamber_ready'
@@ -967,28 +1093,21 @@ local function context_reader(api, game, extend)
     elseif row.ammo_path == 'weapon_resource' then
         row.ammo_status = 'unsupported_resource_component'
     elseif row.ammo_path == 'weapon_heat' then
-        read_heat_component({read=read, pointer=pointer, global=global, lookup=lookup,
-            game=game, owner=owner, weapon_id=weapon_id, weapon=weapon}, row)
+        read_heat_component(e, row)
     elseif row.ammo_path == 'weapon_magazine' then
-        read_magazine_component({read=read, pointer=pointer, global=global, lookup=lookup,
-            game=game, owner=owner, weapon_id=weapon_id, weapon=weapon}, row)
+        read_magazine_component(e, row)
     else
         row.ammo_status = 'unknown_ammo_path'
     end
-    read_backpack_reserves({read=read, pointer=pointer, global=global, lookup=lookup,
-        game=game, owner=owner, weapon_id=weapon_id, avatar_id=entity_id, avatar=entity}, row)
+    read_backpack_reserves(e, row)
     if (row.ammo_path == 'weapon_magazine' or row.ammo_path == 'weapon_heat') and
         (row.weapon_context == 'on_foot' or row.weapon_context == 'vehicle_passenger') then
-        local ok = pcall(read_reload_action, {read=read, pointer=pointer, global=global,
-            lookup=lookup, game=game, owner=owner, weapon_id=weapon_id, weapon=weapon,
-            avatar_id=entity_id, avatar=entity}, row)
+        local ok = pcall(read_reload_action, e, row)
         if not ok then row.reload_state_verified = false end
     end
     if row.current_weapon_resource == 'b6aff2195568767f' and
         (row.weapon_context == 'on_foot' or row.weapon_context == 'vehicle_passenger') then
-        local ok, reason = pcall(read_eruptor_bolt_component,
-            {read=read, pointer=pointer, global=global, lookup=lookup, game=game,
-                owner=owner, weapon_id=weapon_id, weapon=weapon, avatar_id=entity_id, avatar=entity}, row)
+        local ok, reason = pcall(read_eruptor_bolt_component, e, row)
         if not ok then
             row.eruptor_bolt_verified = false
             row.eruptor_bolt_status = 'read_failed:' .. tostring(reason)
@@ -1070,6 +1189,7 @@ local setup_ok, setup_error = pcall(function()
         emit('AMMO_QUERY_CODE_UNAVAILABLE')
     end
 end)
+state.setup_ok, state.setup_error = setup_ok, setup_error
 if not setup_ok then emit('SETUP_ERROR error=' .. tostring(setup_error)) end
 
 local function scalar(value)
@@ -1161,7 +1281,12 @@ local function snapshot(phase)
         debug_emit(string.format('DEBUG_SNAPSHOT_BEGIN tick=%d elapsed=%.3f phase=%s',
             state.ticks, state.elapsed, phase))
     end
+    local read_started = PERF and perf_begin()
     local ok, row, reason = pcall(context_reader, api, game)
+    if read_started then
+        perf_end('context', read_started)
+        if not ok or not row then perf_count('context_failures') end
+    end
     if trace or debug_near_empty(row) then
         debug_emit(string.format(
             'DEBUG_SNAPSHOT_END tick=%d elapsed=%.3f ok=%s status=%s resource=%s mag=%s chamber=%s',
@@ -1199,24 +1324,30 @@ end
 
 local function input_probe()
     local keys = {LMB = 0x01, RMB = 0x02, R = 0x52, F8 = 0x77}
+    state.keys = state.keys or {}
     for name, code in pairs(keys) do
-        local value = api.key_state(code) or 0
-        local down = bit.band(value, 0x8000) ~= 0
-        if state.keys == nil then state.keys = {} end
-        if state.keys[name] ~= down then
-            state.keys[name] = down
-            emit(string.format('INPUT tick=%d elapsed=%.3f name=%s down=%s raw=%d',
-                state.ticks, state.elapsed, name, tostring(down), value))
-            if name == 'F8' and down then
-                state.case_index = (state.case_index or 0) + 1
-                emit(string.format('CASE_MARKER index=%d tick=%d elapsed=%.3f',
-                    state.case_index, state.ticks, state.elapsed))
+        if DEBUG or name == 'LMB' or name == 'R' then
+            local value = api.key_state(code) or 0
+            local down = bit.band(value, 0x8000) ~= 0
+            if state.keys[name] ~= down then
+                state.keys[name] = down
+                if DEBUG then
+                    emit(string.format('INPUT tick=%d elapsed=%.3f name=%s down=%s raw=%d',
+                        state.ticks, state.elapsed, name, tostring(down), value))
+                    if name == 'F8' and down then
+                        state.case_index = (state.case_index or 0) + 1
+                        emit(string.format('CASE_MARKER index=%d tick=%d elapsed=%.3f',
+                            state.case_index, state.ticks, state.elapsed))
+                    end
+                end
             end
         end
     end
-    local down = api.fire_held and api.fire_held() or state.keys.LMB == true
-    if api.native_fire_held then
-        local native_down = api.native_fire_held()
+    local down, native_down
+    if api.fire_states then down, native_down = api.fire_states()
+    else down = api.fire_held and api.fire_held() or state.keys.LMB == true end
+    if DEBUG and api.native_fire_held then
+        if native_down == nil then native_down = api.native_fire_held() end
         if state.native_fire_down ~= native_down then
             state.native_fire_down = native_down
             emit(string.format('INPUT tick=%d elapsed=%.3f name=FIRE_NATIVE down=%s',
@@ -1229,8 +1360,10 @@ local function input_probe()
             state.lmb_edge_time, state.last_lmb_press_at = state.elapsed, state.elapsed
             state.lmb_edge_tick, state.lmb_edge_identity = state.ticks, state.identity
         end
-        emit('INPUT tick=' .. state.ticks .. ' elapsed=' .. string.format('%.3f', state.elapsed) ..
-            ' name=FIRE down=' .. tostring(down))
+        if DEBUG then
+            emit('INPUT tick=' .. state.ticks .. ' elapsed=' .. string.format('%.3f', state.elapsed) ..
+                ' name=FIRE down=' .. tostring(down))
+        end
     end
 end
 
@@ -1483,7 +1616,12 @@ local function reload_request(reason, expected_tactical_count, delay_elapsed, ex
     -- Verify selection/ammo both before stopping FIRE and before sending R.
     debug_emit(string.format('DEBUG_RELOAD_REFRESH_BEGIN tick=%d elapsed=%.3f',
         state.ticks, state.elapsed))
+    local read_started = PERF and perf_begin()
     local ok_read, fresh = pcall(context_reader, api, game)
+    if read_started then
+        perf_end('context', read_started)
+        if not ok_read or not fresh then perf_count('context_failures') end
+    end
     debug_emit(string.format('DEBUG_RELOAD_REFRESH_END tick=%d elapsed=%.3f ok=%s status=%s',
         state.ticks, state.elapsed, tostring(ok_read),
         scalar(type(fresh) == 'table' and fresh.context_status or fresh)))
@@ -1888,7 +2026,12 @@ local function eruptor_bolt_step(periodic_check)
     if ((state.bolt_attempts or 0) >= ERUPTOR_BOLT_MAX_ATTEMPTS and not periodic_check) or
         (state.bolt_requested_at and state.elapsed - state.bolt_requested_at < ERUPTOR_BOLT_RETRY_SECONDS) then return end
     -- Discard the complete fresh snapshot if any guarded pointer/state changes.
+    local read_started = PERF and perf_begin()
     local ok_read, fresh = pcall(context_reader, api, game)
+    if read_started then
+        perf_end('context', read_started)
+        if not ok_read or not fresh then perf_count('context_failures') end
+    end
     if not ok_read or not fresh or fresh.context_status ~= 'context_observed' or
         fresh.current_weapon_resource ~= ERUPTOR_RESOURCE or fresh.weapon_owned ~= true or
         fresh.weapon_context ~= row.weapon_context or fresh._selection_bytes ~= row._selection_bytes or
@@ -1915,13 +2058,17 @@ snapshot('initial')
 
 local original_update = rawget(_G, 'update')
 local function update(dt, ...)
+    local update_started = PERF and perf_begin()
     state.ticks = state.ticks + 1
     sync_mod_options()
+    if update_started then perf_end('options', update_started) end
     if setup_ok then
         state.started_at = state.started_at or api.now()
         state.elapsed = api.now() - state.started_at
         api.release_bolt(not api.game_focused() or not reload_settings.eruptor_auto_bolt)
+        local input_started = PERF and perf_begin()
         input_probe()
+        if input_started then perf_end('input', input_started) end
         if DEBUG and state.empty_since and state.lmb_edge_time and
             state.elapsed - state.lmb_edge_time <= 0.25 then
             debug_emit(string.format('DEBUG_EMPTY_ATTACK_FRAME tick=%d elapsed=%.3f',
@@ -1931,6 +2078,7 @@ local function update(dt, ...)
             state.last_snapshot = state.elapsed
             snapshot('periodic')
         end
+        local control_started = PERF and perf_begin()
         state.weapon_switch_pending = api.weapon_switch_pending()
         maintain_reload_input()
         -- Check the current weapon and switch inputs before keyup can emit Tap.
@@ -1963,7 +2111,11 @@ local function update(dt, ...)
             debug_emit(string.format('DEBUG_AUTO_STEP_END tick=%d elapsed=%.3f',
                 state.ticks, state.elapsed))
         end
+        if control_started then perf_end('control', control_started) end
     end
+    flush_log(false)
+    if update_started then perf_end('update', update_started) end
+    if PERF then perf_report(false) end
     if original_update then return original_update(dt, ...) end
 end
 _G.update = update
@@ -1971,6 +2123,8 @@ local original_shutdown = rawget(_G, 'shutdown')
 _G.shutdown = function(...)
     state.pending_reload = nil
     if api then api.update_fire_interrupt(true); api.release_bolt(true); api.release_reload(true) end
+    perf_report(true)
+    flush_log(true)
     if original_shutdown then return original_shutdown(...) end
 end
 return state

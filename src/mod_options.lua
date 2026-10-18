@@ -5,6 +5,7 @@ local reload_settings = {
     per_round_threshold = 1,
     ac8_threshold = 1,
     logging = false,
+    performance_logging = false,
     eruptor_auto_bolt = true,
     periodic_check = 1,
 }
@@ -16,7 +17,10 @@ local reload_options = {
         description='开启后使用战术阈值；关闭后仍保留打空自动换弹。/ Enables tactical thresholds; empty reload remains active when off.'}},
     {key='logging', id='liu.auto_reload.logging', spec={
         type='toggle', label='日志打印/Logging', default=false,
-        description='开启后记录输入、弹药与换弹诊断；关闭后停止本模组日志输出。/ Records input, ammo and reload diagnostics when enabled; disables this mod logging when off.'}},
+        description='开启后记录输入、弹药与换弹诊断；关闭后停止详细日志输出。性能统计使用独立开关。/ Records detailed input, ammo and reload diagnostics. Performance Logging is independent.'}},
+    {key='performance_logging', id='liu.auto_reload.performance_logging', spec={
+        type='toggle', label='性能统计/Performance Logging', default=false,
+        description='每5秒输出耗时、内存读取和缓存统计到AutoReloadRounds.log；建议关闭详细日志后测量，不影响换弹时序。/ Writes timing, read and cache summaries every 5 s. Disable detailed Logging for performance measurements.'}},
     {key='eruptor_auto_bolt', id='liu.auto_reload.eruptor_auto_bolt', spec={
         type='toggle', label='爆裂铳自动拉栓/Eruptor Auto Bolt', default=true,
         description='爆裂铳需要拉栓时自动短按开火；独立于战术换弹，玩家按住开火或武器动作进行中时等待。默认开火键须为鼠标左键。/ Taps fire when the Eruptor needs cycling; waits for fire release and active actions. Independent of tactical reload. Requires left mouse fire.'}},
@@ -70,7 +74,7 @@ local function sync_mod_options()
     local menu = rawget(_G, 'ModOptionsMenu')
     if type(menu) ~= 'table' or menu.api ~= 1 or
         type(menu.register_option) ~= 'function' or type(menu.get) ~= 'function' then return end
-    local changed, logging_changed = false, false
+    local changed, logging_changed, performance_changed = false, false, false
     if menu ~= options_menu then
         options_menu, registered_options = menu, {}
         for _, option in ipairs(reload_options) do
@@ -91,11 +95,23 @@ local function sync_mod_options()
                 value >= 1 and value <= #option.spec.choices
             if ok and valid and reload_settings[option.key] ~= value then
                 reload_settings[option.key] = value
-                if option.key == 'logging' then logging_changed = true else changed = true end
+                if option.key == 'logging' then logging_changed = true
+                elseif option.key == 'performance_logging' then performance_changed = true
+                else changed = true end
             end
         end
     end
     DEBUG = reload_settings.logging
+    if performance_changed then
+        perf_report(true)
+        state.performance = nil
+        PERF = reload_settings.performance_logging
+        write_log('PERF_' .. (PERF and 'ENABLED' or 'DISABLED') ..
+            ' revision=' .. state.revision .. ' interval_s=5 static_recheck_s=1' ..
+            ' setup_ok=' .. tostring(state.setup_ok) ..
+            (state.setup_error and ' setup_error=' .. tostring(state.setup_error):gsub('%s+', '_') or ''), true)
+    end
+    if logging_changed or performance_changed then flush_log(true) end
     if changed then reset_reload_settings_state() end
     if logging_changed and DEBUG then emit('LOGGING_ENABLED revision=' .. state.revision) end
     if changed or logging_changed or not state.options_logged then

@@ -14,25 +14,50 @@ local specs = {
     backpack = {map=static_unhex(static_backpack_map), slot=0xf12a00, stride=152},
     item = {map=static_unhex(static_item_map), slot=0xf12bc0, stride=232},
 }
-component_static_record = function(e, row, name)
-    local spec = assert(specs[name], 'unknown_component_map')
-    local index, entry_offset
+for _, spec in pairs(specs) do
+    spec.resources = {}
     for offset = 0, #spec.map - 16, 16 do
-        if resource(spec.map:sub(offset + 1, offset + 8)) == row.current_weapon_resource then
-            index, entry_offset = u32(spec.map, offset + 8), offset
-            break
+        local key = resource(spec.map:sub(offset + 1, offset + 8))
+        -- Keep the original first-match rule for duplicate/empty keys.
+        if not spec.resources[key] then
+            spec.resources[key] = {index=u32(spec.map, offset + 8), offset=offset}
         end
     end
-    if not index or index >= #spec.map / 16 then return nil end
-    local address = e.pointer(e.owner + spec.slot, true)
-    -- Compare the whole resource/index map, including bytes beyond the prefix.
-    for offset = 0, #spec.map - 1, 2048 do
-        local wanted = spec.map:sub(offset + 1, offset + 2048)
-        if e.read(address + offset, #wanted) ~= wanted then return nil end
+end
+component_static_record = function(e, row, name)
+    local started = PERF and perf_begin()
+    local spec = assert(specs[name], 'unknown_component_map')
+    local entry = spec.resources[row.current_weapon_resource]
+    if not entry or entry.index >= #spec.map / 16 then
+        if started then perf_end('static', started) end
+        return nil
     end
-    assert(e.read(address + entry_offset, 16, true) ==
-        spec.map:sub(entry_offset + 1, entry_offset + 16), 'static_resource_identity_changed')
-    return e.read(address + #spec.map + index * spec.stride, spec.stride, true)
+    local address = e.pointer(e.owner + spec.slot, true)
+    local cached = e.cache and e.cache.maps[name]
+    if not cached or cached.owner ~= e.owner or cached.address ~= address or
+        e.now < cached.at or e.now - cached.at >= 1 then
+        -- Full map checks are bounded to one second; the selected entry and
+        -- effective record remain guarded on EVERY snapshot, including sends.
+        if PERF then perf_count('map_checks') end
+        local valid = true
+        for offset = 0, #spec.map - 1, 2048 do
+            local wanted = spec.map:sub(offset + 1, offset + 2048)
+            if e.read(address + offset, #wanted) ~= wanted then valid = false; break end
+        end
+        cached = {owner=e.owner, address=address, at=e.now, valid=valid}
+        if e.cache then e.cache.maps[name] = cached end
+    elseif PERF then
+        perf_count('map_hits')
+    end
+    if not cached.valid then
+        if started then perf_end('static', started) end
+        return nil
+    end
+    assert(e.read(address + entry.offset, 16, true) ==
+        spec.map:sub(entry.offset + 1, entry.offset + 16), 'static_resource_identity_changed')
+    local record = e.read(address + #spec.map + entry.index * spec.stride, spec.stride, true)
+    if started then perf_end('static', started) end
+    return record
 end
 magazine_static_records = function(e, row)
     local record = component_static_record(e, row, 'magazine')
